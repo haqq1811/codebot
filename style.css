@@ -230,6 +230,7 @@ button.send-btn {
 /* Fix lists running off or overflowing padding */
 .msg ol, 
 .msg ul {
+  list-style-position: inside !important;
   padding-left: 20px !important;
   margin-left: 0 !important;
   margin-right: 0 !important;
