@@ -109,17 +109,27 @@ async function sendMessage() {
     parts: userParts
   });
 
-  const loadingDiv = appendMessage('Thinking...', 'ai');
+  // Initial thinking state with animated dots
+  const loadingDiv = appendMessage(
+    `<div style="display: flex; align-items: center; gap: 8px;">
+       Thinking <span class="thinking-dots"><span></span><span></span><span></span></span>
+     </div>`, 
+    'ai'
+  );
 
   const chosenModel = modelSelect.value;
   const modelQueue = [chosenModel, ...FALLBACK_CHAIN.filter(m => m !== chosenModel)];
 
   let responseText = null;
+  let thoughtsText = null;
   let lastError = null;
 
   for (const modelCandidate of modelQueue) {
     try {
-      loadingDiv.textContent = `Thinking using (${modelCandidate})...`;
+      loadingDiv.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 8px;">
+          Thinking using (${modelCandidate}) <span class="thinking-dots"><span></span><span></span><span></span></span>
+        </div>`;
 
       const response = await ai.models.generateContent({
         model: modelCandidate,
@@ -127,6 +137,12 @@ async function sendMessage() {
       });
 
       responseText = response.text;
+
+      // Extract thinking/reasoning process if supported by model response
+      if (response.candidates?.[0]?.content?.parts) {
+        const thoughtPart = response.candidates[0].content.parts.find(p => p.thought);
+        if (thoughtPart) thoughtsText = thoughtPart.text;
+      }
       
       if (modelSelect.value !== modelCandidate) {
         modelSelect.value = modelCandidate;
@@ -140,7 +156,9 @@ async function sendMessage() {
   }
 
   if (responseText) {
-    loadingDiv.textContent = responseText;
+    // Format full response with Markdown, Code Copy buttons, and Thoughts dropdown
+    renderFormattedContent(loadingDiv, responseText, thoughtsText);
+
     chatHistory.push({
       role: 'model',
       parts: [{ text: responseText }]
@@ -155,8 +173,52 @@ async function sendMessage() {
 function appendMessage(text, sender) {
   const msg = document.createElement('div');
   msg.className = `msg ${sender}`;
-  msg.textContent = text;
+
+  if (sender === 'user') {
+    msg.textContent = text;
+  } else {
+    msg.innerHTML = text;
+  }
+
   chatBox.appendChild(msg);
   chatBox.scrollTop = chatBox.scrollHeight;
   return msg;
+}
+
+function renderFormattedContent(container, markdownText, thoughtText = null) {
+  let htmlOutput = '';
+
+  // 1. Render Claude-style thinking block if present
+  if (thoughtText) {
+    htmlOutput += `
+      <div class="thought-container">
+        <div class="thought-toggle" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'block' ? 'none' : 'block'">
+          <span>Thought for a few seconds</span> ▾
+        </div>
+        <div class="thought-content">${thoughtText}</div>
+      </div>`;
+  }
+
+  // 2. Convert response Markdown to HTML
+  htmlOutput += typeof marked !== 'undefined' ? marked.parse(markdownText) : markdownText;
+  container.innerHTML = htmlOutput;
+
+  // 3. Attach interactive Copy buttons to all code blocks
+  const codeBlocks = container.querySelectorAll('pre');
+  codeBlocks.forEach((pre) => {
+    const button = document.createElement('button');
+    button.className = 'copy-btn';
+    button.innerText = 'Copy';
+
+    button.addEventListener('click', async () => {
+      const code = pre.querySelector('code')?.innerText || pre.innerText;
+      await navigator.clipboard.writeText(code);
+      button.innerText = 'Copied!';
+      setTimeout(() => (button.innerText = 'Copy'), 2000);
+    });
+
+    pre.appendChild(button);
+  });
+
+  chatBox.scrollTop = chatBox.scrollHeight;
 }
