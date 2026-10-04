@@ -396,3 +396,12 @@ function startNewChat() {
 if (newChatBtn) {
   newChatBtn.addEventListener('click', startNewChat);
 }
+// Register Service Worker for PWA & Offline Support
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js')
+      .then((reg) => console.log('Service Worker Registered!', reg.scope))
+      .catch((err) => console.warn('Service Worker Registration Failed:', err));
+  });
+}
+
