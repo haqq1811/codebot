@@ -188,7 +188,7 @@ function appendMessage(text, sender) {
 function renderFormattedContent(container, markdownText, thoughtText = null) {
   let htmlOutput = '';
 
-  // 1. Render Claude-style thinking block if present
+  // 1. Render thinking block if present
   if (thoughtText) {
     htmlOutput += `
       <div class="thought-container">
@@ -199,20 +199,28 @@ function renderFormattedContent(container, markdownText, thoughtText = null) {
       </div>`;
   }
 
-  // 2. Convert response Markdown to HTML
+  // 2. Parse Markdown
   htmlOutput += typeof marked !== 'undefined' ? marked.parse(markdownText) : markdownText;
   container.innerHTML = htmlOutput;
 
-  // 3. Attach interactive Copy buttons to all code blocks
+  // 3. Apply Syntax Highlighting & Attach Copy Buttons
   const codeBlocks = container.querySelectorAll('pre');
   codeBlocks.forEach((pre) => {
+    const codeTag = pre.querySelector('code');
+    
+    // Apply Highlight.js coloring
+    if (codeTag && typeof hljs !== 'undefined') {
+      hljs.highlightElement(codeTag);
+    }
+
+    // Append Copy button inside <pre>
     const button = document.createElement('button');
     button.className = 'copy-btn';
     button.innerText = 'Copy';
 
     button.addEventListener('click', async () => {
-      const code = pre.querySelector('code')?.innerText || pre.innerText;
-      await navigator.clipboard.writeText(code);
+      const codeText = codeTag ? codeTag.innerText : pre.innerText;
+      await navigator.clipboard.writeText(codeText);
       button.innerText = 'Copied!';
       setTimeout(() => (button.innerText = 'Copy'), 2000);
     });
