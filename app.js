@@ -63,23 +63,49 @@ function clearChat() {
 }
 
 function handleFileSelect(event) {
-  const file = event.target.files[0];
-  if (!file) return;
+  const files = Array.from(event.target.files);
+  if (!files.length) return;
 
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    const base64Data = e.target.result.split(',')[1];
-    currentAttachment = {
-      inlineData: {
-        data: base64Data,
-        mimeType: file.type || 'application/octet-stream'
+  let loadedCount = 0;
+
+  files.forEach((file) => {
+    const reader = new FileReader();
+    reader.onload = function (e) {
+      const base64Data = e.target.result.split(',')[1];
+      
+      currentAttachments.push({
+        inlineData: {
+          data: base64Data,
+          mimeType: file.type || 'application/octet-stream'
+        },
+        name: file.name
+      });
+
+      loadedCount++;
+      if (loadedCount === files.length) {
+        updateFilePreview();
       }
     };
-    fileNameDisplay.textContent = `Attached: ${file.name}`;
-    filePreviewBar.style.display = 'flex';
-  };
-  reader.readAsDataURL(file);
+    reader.readAsDataURL(file);
+  });
 }
+
+function updateFilePreview() {
+  if (currentAttachments.length > 0) {
+    fileNameDisplay.textContent = `Attached: ${currentAttachments.length} file(s)`;
+    filePreviewBar.style.display = 'flex';
+  } else {
+    clearFileAttachment();
+  }
+}
+
+function clearFileAttachment() {
+  currentAttachments = [];
+  fileInput.value = '';
+  filePreviewBar.style.display = 'none';
+  fileNameDisplay.textContent = '';
+}
+
 
 function clearFileAttachment() {
   currentAttachment = null;
@@ -90,15 +116,21 @@ function clearFileAttachment() {
 
 async function sendMessage() {
   const text = userInput.value.trim();
-  if ((!text && !currentAttachment) || !ai) return;
+  if ((!text && currentAttachments.length === 0) || !ai) return;
 
   const userParts = [];
-  if (currentAttachment) userParts.push(currentAttachment);
+
+  // Push all inlineData objects directly to Gemini
+  currentAttachments.forEach((att) => {
+    userParts.push({ inlineData: att.inlineData });
+  });
+
   if (text) userParts.push({ text: text });
 
-  const displayPrompt = currentAttachment 
-    ? `[File Attached]\n${text}` 
+  const displayPrompt = currentAttachments.length > 0 
+    ? `[${currentAttachments.length} File(s) Attached]\n${text}` 
     : text;
+
   appendMessage(displayPrompt, 'user');
 
   userInput.value = '';
