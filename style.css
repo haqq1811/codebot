@@ -217,52 +217,46 @@ button.send-btn {
   font-weight: bold; 
   cursor: pointer; 
 }
-/* Code block wrapper and formatting */
-.message pre {
-  position: relative;
-  background-color: #1e1e1e;
+/* Ensure the code block container is the positioning parent */
+.msg pre {
+  position: relative !important;
+  background-color: #1e1e1e !important;
   border-radius: 8px;
-  padding: 12px 14px;
-  overflow-x: auto;
+  padding: 14px 14px 12px 14px;
   margin: 10px 0;
+  overflow-x: auto;
   border: 1px solid #333;
 }
 
-.message pre code {
+.msg pre code {
   font-family: 'Fira Code', 'Consolas', monospace;
   font-size: 0.85rem;
-  color: #e6edf3;
-  white-space: pre;
+  line-height: 1.4;
+  background: transparent !important; /* Let highlight.js theme pass through */
 }
 
-/* Inline code tags */
-.message :not(pre) > code {
-  background-color: rgba(255, 255, 255, 0.1);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: monospace;
-  font-size: 0.85em;
-}
-
-/* Copy button positioning and design */
+/* Copy Button anchored specifically inside the code box */
 .copy-btn {
-  position: absolute;
+  position: absolute !important;
   top: 8px;
   right: 8px;
-  background: #2d2d2d;
-  color: #a0a0a0;
+  background: #2b2b2b;
+  color: #c9d1d9;
   border: 1px solid #444;
-  border-radius: 4px;
-  padding: 4px 8px;
-  font-size: 0.75rem;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  z-index: 10;
+  transition: background 0.2s ease;
 }
 
 .copy-btn:hover {
   background: #3d3d3d;
   color: #ffffff;
 }
+
 /* Animated Three-Dot Loader */
 .thinking-dots {
   display: inline-flex;
