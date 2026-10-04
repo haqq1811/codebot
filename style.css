@@ -333,16 +333,30 @@ button.send-btn {
   padding: 8px 10px;
   border-radius: 6px;
 }
-/* Compact loader bubble */
+/* Compact pill layout for thinking indicator */
 .msg.thinking-indicator {
   width: fit-content !important;
   max-width: fit-content !important;
+  min-height: unset !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
   padding: 8px 14px !important;
+  margin: 6px 0 !important;
   font-size: 0.85rem;
   color: #a0a0a0;
   background-color: #1e1e1e !important;
   border: 1px solid #333;
-  border-radius: 18px;
+  border-radius: 20px;
+  box-sizing: border-box;
+}
+
+/* Ensure inner container aligns content horizontally in one line */
+.msg.thinking-indicator > div {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  white-space: nowrap !important;
 }
 
 
