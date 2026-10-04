@@ -217,25 +217,55 @@ button.send-btn {
   font-weight: bold; 
   cursor: pointer; 
 }
-/* Ensure the code block container is the positioning parent */
+/* 1. Fix Message Box Boundaries */
+.msg {
+  max-width: 85%;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-radius: 12px;
+}
+
+/* Ensure inner elements stay inside container padding */
+.msg.ai, .msg.model {
+  background-color: #242424;
+  color: #e6edf3;
+  width: 100%;
+}
+
+/* 2. Fix Blue Hyperlink Colors to Sky Blue */
+.msg a {
+  color: #38bdf8 !important; /* Sky Blue */
+  text-decoration: underline;
+}
+
+.msg a:hover {
+  color: #7dd3fc !important;
+}
+
+/* 3. Inset Code Block (Nested Look) */
 .msg pre {
   position: relative !important;
-  background-color: #1e1e1e !important;
+  background-color: #161616 !important; /* Darker than message bubble for depth */
+  border: 1px solid #333333;
   border-radius: 8px;
   padding: 14px 14px 12px 14px;
-  margin: 10px 0;
-  overflow-x: auto;
-  border: 1px solid #333;
+  margin: 12px 0;
+  max-width: 100%;
+  overflow-x: auto; /* Internal scrolling for long code lines */
+  box-sizing: border-box;
 }
 
 .msg pre code {
   font-family: 'Fira Code', 'Consolas', monospace;
   font-size: 0.85rem;
-  line-height: 1.4;
-  background: transparent !important; /* Let highlight.js theme pass through */
+  line-height: 1.5;
+  background: transparent !important;
+  display: block;
 }
 
-/* Copy Button anchored specifically inside the code box */
+/* 4. Fix Copy Button Position */
 .copy-btn {
   position: absolute !important;
   top: 8px;
@@ -243,13 +273,11 @@ button.send-btn {
   background: #2b2b2b;
   color: #c9d1d9;
   border: 1px solid #444;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 3px 8px;
   font-size: 0.72rem;
-  font-weight: 500;
   cursor: pointer;
   z-index: 10;
-  transition: background 0.2s ease;
 }
 
 .copy-btn:hover {
