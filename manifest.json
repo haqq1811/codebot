@@ -1,0 +1,22 @@
+{
+  "name": "AI Web",
+  "short_name": "Gemini",
+  "description": "Custom Gemini AI Client with offline local chat history.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#181818",
+  "theme_color": "#181818",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/16206/16206801.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/16206/16206801.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
