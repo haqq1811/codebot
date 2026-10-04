@@ -4,7 +4,7 @@ let ai = null;
 let apiKey = localStorage.getItem('GEMINI_API_KEY');
 
 let chatHistory = []; 
-let currentAttachment = null; 
+let currentAttachment = []; 
 
 const FALLBACK_CHAIN = [
   'gemini-3.8-flash',
