@@ -2,20 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
-  <link rel="manifest" href="./manifest.json">
+  <!-- viewport-fit=cover: draw under notches. interactive-widget: the on-screen keyboard resizes the page instead of covering the input. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#181818">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231565c0'/%3E%3Cpath d='M16 6l2.6 7.4L26 16l-7.4 2.6L16 26l-2.6-7.4L6 16l7.4-2.6z' fill='%23fff'/%3E%3C/svg%3E">
 
   <title>Gemini Mobile Studio</title>
-  
-  <link rel="stylesheet" href="style.css">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-  
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-  <!-- Fixed Importmap JSON syntax -->
+  <!-- highlight.js theme first so style.css can override it without !important -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="style.css">
+
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <!-- Sanitizes model output before it is inserted into the page -->
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+
   <script type="importmap">
     {
       "imports": {
@@ -24,67 +32,115 @@
     }
   </script>
 </head>
-  
+
 <body>
+  <!-- Icon sprite: one definition, reused with <use href="#i-name"> -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+    <symbol id="i-clip" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></symbol>
+  </svg>
 
-  <header>
-    <h1>Gemini</h1>
-    <div class="header-controls">
-      <select id="model-select" class="model-select">
-        <option value="gemini-3.8-flash">3.8 Flash</option>
-        <option value="gemini-3.5-flash-lite">3.5 Flash Lite</option>
-        <option value="gemini-2.5-flash">2.5 Flash</option>
-        <option value="gemini-2.5-pro">2.5 Pro</option>
-      </select>
-      <button id="clear-chat-btn">Clear</button>
-      <button id="clear-key-btn">Key</button>
-    </div>
-    <!-- Inside your header bar -->
-<div class="header-left">
-  <button id="menu-btn" class="icon-btn">☰</button>
-  <span class="app-title">Gemini</span>
-</div>
+  <div id="app">
 
-<!-- Add Sidebar Overlay and Drawer right below header -->
-<div id="sidebar-overlay" class="overlay"></div>
-<aside id="sidebar" class="sidebar">
-  <div class="sidebar-header">
-    <h3>Chat History</h3>
-    <button id="new-chat-btn" class="primary-btn">+ New Chat</button>
-  </div>
-  <div id="history-list" class="history-list">
-    <!-- Saved sessions will be dynamically rendered here -->
-  </div>
-</aside>
-    
-  </header>
+    <!-- Chat history: slide-over drawer on phones, docked column on desktop -->
+    <div id="sidebar-overlay" class="overlay"></div>
+    <aside id="sidebar" class="sidebar" aria-label="Chat history">
+      <div class="sidebar-header">
+        <h2>Chat History</h2>
+        <button id="new-chat-btn" class="primary-btn" type="button">
+          <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg> New Chat
+        </button>
+      </div>
+      <div id="history-list" class="history-list">
+        <!-- Saved sessions are rendered here -->
+      </div>
+    </aside>
 
-  <div id="chat-box"></div>
+    <div id="main">
+      <header>
+        <div class="header-left">
+          <button id="menu-btn" class="icon-btn" type="button" aria-label="Toggle chat history" aria-controls="sidebar" aria-expanded="false">
+            <svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg>
+          </button>
+          <h1 class="app-title">Gemini</h1>
+        </div>
 
-  <div id="file-preview-bar">
-    <span id="file-name-display"></span>
-    <button id="remove-file-btn">✕</button>
-  </div>
+        <div class="header-controls">
+          <select id="model-select" class="model-select" aria-label="Model">
+            <option value="gemini-3.8-flash">3.8 Flash</option>
+            <option value="gemini-3.5-flash-lite">3.5 Flash Lite</option>
+            <option value="gemini-2.5-flash">2.5 Flash</option>
+            <option value="gemini-2.5-pro">2.5 Pro</option>
+          </select>
+          <button id="clear-chat-btn" class="hdr-btn" type="button" title="Clear this chat" aria-label="Clear this chat">
+            <svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg><span class="btn-label">Clear</span>
+          </button>
+          <button id="key-btn" class="hdr-btn" type="button" title="API key" aria-label="API key">
+            <svg class="icon" aria-hidden="true"><use href="#i-key"/></svg><span class="btn-label">Key</span>
+          </button>
+        </div>
+      </header>
 
-  <div id="input-area">
-    <label class="file-upload-label" for="file-input" title="Attach file">📎</label>
-    <input type="file" id="file-input" multiple accept="*/*" style="display:none;" />
-  
-    <input type="text" id="user-input" placeholder="Type a message...">
-    <button id="send-btn" class="send-btn">Send</button>
-  </div>
-  <!-- Modal starts hidden by default -->
-  <div id="key-modal" class="modal" style="display: none;">
-    <div class="modal-content">
-      <h3>Enter AI Studio API Key</h3>
-      <p>Saved locally in browser storage.</p>
-      <input type="password" id="api-key-input" placeholder="Paste your API key here...">
-      <div class="modal-buttons">
-        <button id="save-key-btn" class="primary-btn">Save Key</button>
-        <button id="close-key-btn" class="secondary-btn">Close</button>
+      <main id="chat-box" aria-label="Conversation">
+        <div id="empty-state">
+          <h2>What can I help with?</h2>
+          <p>Type a prompt or attach files to get started.</p>
+          <button id="empty-key-btn" class="primary-btn" type="button" hidden>Add your API key</button>
+        </div>
+      </main>
+
+      <div id="composer">
+        <div id="file-preview-bar" hidden>
+          <div id="file-chip-list"></div>
+          <div class="file-bar-row">
+            <span id="file-name-display"></span>
+            <button id="remove-file-btn" type="button">Clear all</button>
+          </div>
+        </div>
+
+        <div id="input-area">
+          <button id="attach-btn" class="file-upload-label" type="button" title="Attach files" aria-label="Attach files">
+            <svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg>
+          </button>
+          <input type="file" id="file-input" multiple hidden>
+
+          <textarea id="user-input" rows="1" placeholder="Type a message..." aria-label="Message" enterkeyhint="send" autocomplete="off"></textarea>
+
+          <button id="send-btn" class="send-btn" type="button" aria-label="Send">
+            <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg><span class="btn-label">Send</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
+
+  <!-- API key modal (hidden until opened) -->
+  <div id="key-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="key-modal-title" hidden>
+    <div class="modal-content">
+      <h3 id="key-modal-title">Enter AI Studio API Key</h3>
+      <p>Saved locally in this browser's storage. Create a key at
+        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">aistudio.google.com/apikey</a>.</p>
+      <div class="key-row">
+        <input type="password" id="api-key-input" placeholder="Paste your API key here..." autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button id="toggle-key-btn" class="secondary-btn" type="button" aria-pressed="false">Show</button>
+      </div>
+      <div class="modal-buttons">
+        <button id="save-key-btn" class="primary-btn" type="button">Save Key</button>
+        <button id="close-key-btn" class="secondary-btn" type="button">Close</button>
+      </div>
+      <button id="remove-key-btn" class="danger-link" type="button" hidden>Remove saved key</button>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>
