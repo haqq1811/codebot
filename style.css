@@ -220,12 +220,27 @@ button.send-btn {
 /* 1. Fix Message Box Boundaries */
 .msg {
   max-width: 85%;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   box-sizing: border-box;
   padding: 12px 16px;
   border-radius: 12px;
 }
+
+/* Fix lists running off or overflowing padding */
+.msg ol, 
+.msg ul {
+  padding-left: 20px !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  box-sizing: border-box;
+}
+
+.msg li {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 
 /* Ensure inner elements stay inside container padding */
 .msg.ai, .msg.model {
