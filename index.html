@@ -73,16 +73,18 @@
     <input type="text" id="user-input" placeholder="Type a message...">
     <button id="send-btn" class="send-btn">Send</button>
   </div>
-
-  <div id="key-modal">
+  <!-- Modal starts hidden by default -->
+  <div id="key-modal" class="modal" style="display: none;">
     <div class="modal-content">
       <h3>Enter AI Studio API Key</h3>
-      <p style="font-size: 0.85rem; color: #aaa;">Saved locally in browser storage.</p>
-      <input type="password" id="api-key-input" placeholder="AIzaSy...">
-      <button id="save-key-btn">Save Key</button>
+      <p>Saved locally in browser storage.</p>
+      <input type="password" id="api-key-input" placeholder="Paste your API key here...">
+      <div class="modal-buttons">
+        <button id="save-key-btn" class="primary-btn">Save Key</button>
+        <button id="close-key-btn" class="secondary-btn">Close</button>
+      </div>
     </div>
   </div>
-
   <script type="module" src="app.js"></script>
 </body>
 </html>
