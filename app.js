@@ -4,7 +4,56 @@ let ai = null;
 let apiKey = localStorage.getItem('GEMINI_API_KEY');
 
 let chatHistory = []; 
-let currentAttachment = []; 
+// Make sure currentAttachments is an array
+let currentAttachments = [];
+
+function handleFileSelect(event) {
+  const files = Array.from(event.target.files);
+  if (!files.length) return;
+
+  let loadedCount = 0;
+
+  files.forEach((file) => {
+    const reader = new FileReader();
+    reader.onload = function (e) {
+      const base64Data = e.target.result.split(',')[1];
+      
+      // Append new attachments without removing old ones
+      currentAttachments.push({
+        inlineData: {
+          data: base64Data,
+          mimeType: file.type || 'application/octet-stream'
+        },
+        name: file.name
+      });
+
+      loadedCount++;
+      if (loadedCount === files.length) {
+        updateFilePreview();
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // Reset input value so selecting the same file again triggers 'change'
+  event.target.value = '';
+}
+
+function updateFilePreview() {
+  if (currentAttachments.length > 0) {
+    fileNameDisplay.textContent = `Attached: ${currentAttachments.length} file(s)`;
+    filePreviewBar.style.display = 'flex';
+  } else {
+    clearFileAttachment();
+  }
+}
+
+function clearFileAttachment() {
+  currentAttachments = [];
+  fileInput.value = '';
+  filePreviewBar.style.display = 'none';
+  fileNameDisplay.textContent = '';
+}
 
 const FALLBACK_CHAIN = [
   'gemini-3.8-flash',
