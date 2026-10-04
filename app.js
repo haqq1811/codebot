@@ -12,8 +12,47 @@ const FALLBACK_CHAIN = [
   'gemini-2.5-flash',
   'gemini-2.5-pro'
 ];
-
+// UI Elements
 const keyModal = document.getElementById('key-modal');
+const keyBtn = document.getElementById('key-btn'); // Top bar "Key" button
+const closeKeyBtn = document.getElementById('close-key-btn');
+
+// --- Event Listeners for API Key Modal ---
+
+// Open key modal deliberately via top bar button
+if (keyBtn) {
+  keyBtn.addEventListener('click', () => {
+    // Pre-fill input if a key is already saved
+    const savedKey = localStorage.getItem('GEMINI_API_KEY');
+    if (savedKey) {
+      document.getElementById('api-key-input').value = savedKey;
+    }
+    keyModal.style.display = 'flex';
+  });
+}
+
+// Close key modal without forcing save
+if (closeKeyBtn) {
+  closeKeyBtn.addEventListener('click', () => {
+    keyModal.style.display = 'none';
+  });
+}
+
+// Close modal if user clicks outside the modal box
+window.addEventListener('click', (e) => {
+  if (e.target === keyModal) {
+    keyModal.style.display = 'none';
+  }
+});
+
+// --- App Initialization on Page Load ---
+
+// If key exists, initialize the SDK silently without popping up any modal
+if (apiKey) {
+  initAI(apiKey);
+}
+// DO NOT open keyModal automatically if no key exists!
+
 const chatBox = document.getElementById('chat-box');
 const userInput = document.getElementById('user-input');
 const fileInput = document.getElementById('file-input');
@@ -115,9 +154,16 @@ function clearFileAttachment() {
 }
 
 async function sendMessage() {
-  const text = userInput.value.trim();
-  if ((!text && currentAttachments.length === 0) || !ai) return;
+    // Check if API key / AI is initialized first
+  if (!ai) {
+    appendMessage("⚠️ Please set your API Key in the 'Key' menu first!", "ai");
+    keyModal.style.display = 'flex';
+    return;
+  }
 
+  const text = userInput.value.trim();
+  if (!text && currentAttachments.length === 0) return;
+  
   const userParts = [];
 
   // Push all inlineData objects directly to Gemini
