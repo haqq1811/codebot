@@ -110,13 +110,14 @@ async function sendMessage() {
   });
 
   // Initial thinking state with animated dots
-  const loadingDiv = appendMessage(
+    const loadingDiv = appendMessage(
     `<div style="display: flex; align-items: center; gap: 8px;">
        Thinking <span class="thinking-dots"><span></span><span></span><span></span></span>
-     </div>`, 
+     </div>`,
     'ai'
   );
-
+  loadingDiv.classList.add('thinking-indicator');
+  
   const chosenModel = modelSelect.value;
   const modelQueue = [chosenModel, ...FALLBACK_CHAIN.filter(m => m !== chosenModel)];
 
@@ -156,14 +157,17 @@ async function sendMessage() {
   }
 
   if (responseText) {
+    loadingDiv.classList.remove('thinking-indicator');
     // Format full response with Markdown, Code Copy buttons, and Thoughts dropdown
     renderFormattedContent(loadingDiv, responseText, thoughtsText);
+    
 
     chatHistory.push({
       role: 'model',
       parts: [{ text: responseText }]
     });
   } else {
+    loadingDiv.classList.remove('thinking-indicator');
     loadingDiv.textContent = 'Error on all fallback models: ' + (lastError?.message || JSON.stringify(lastError));
     loadingDiv.style.color = '#ff6b6b';
     chatHistory.pop();
