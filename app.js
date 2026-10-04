@@ -5,20 +5,23 @@ let apiKey = localStorage.getItem('GEMINI_API_KEY');
 
 let chatHistory = []; 
 // Make sure currentAttachments is an array
+// Global state
 let currentAttachments = [];
 
-function handleFileSelect(event) {
-  const files = Array.from(event.target.files);
+const fileInput = document.getElementById('file-input');
+
+fileInput.addEventListener('change', (e) => {
+  const files = Array.from(e.target.files);
   if (!files.length) return;
 
   let loadedCount = 0;
 
   files.forEach((file) => {
     const reader = new FileReader();
-    reader.onload = function (e) {
-      const base64Data = e.target.result.split(',')[1];
-      
-      // Append new attachments without removing old ones
+    reader.onload = (event) => {
+      const base64Data = event.target.result.split(',')[1];
+
+      // Append into currentAttachments array
       currentAttachments.push({
         inlineData: {
           data: base64Data,
@@ -29,15 +32,17 @@ function handleFileSelect(event) {
 
       loadedCount++;
       if (loadedCount === files.length) {
-        updateFilePreview();
+        // Update display text when all selected files finish reading
+        document.getElementById('file-name-display').textContent = `Attached: ${currentAttachments.length} file(s)`;
+        document.getElementById('file-preview-bar').style.display = 'flex';
       }
     };
     reader.readAsDataURL(file);
   });
 
-  // Reset input value so selecting the same file again triggers 'change'
-  event.target.value = '';
-}
+  // IMPORTANT: Clear input value so selecting again triggers the 'change' event properly
+  fileInput.value = '';
+});
 
 function updateFilePreview() {
   if (currentAttachments.length > 0) {
