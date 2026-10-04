@@ -110,7 +110,7 @@ async function sendMessage() {
   });
 
   // Initial thinking state with animated dots
-    const loadingDiv = appendMessage(
+  const loadingDiv = appendMessage(
     `<div style="display: flex; align-items: center; gap: 8px;">
        Thinking <span class="thinking-dots"><span></span><span></span><span></span></span>
      </div>`,
@@ -160,12 +160,14 @@ async function sendMessage() {
     loadingDiv.classList.remove('thinking-indicator');
     // Format full response with Markdown, Code Copy buttons, and Thoughts dropdown
     renderFormattedContent(loadingDiv, responseText, thoughtsText);
-    
 
     chatHistory.push({
       role: 'model',
       parts: [{ text: responseText }]
     });
+
+    // Save session automatically after model responds
+    saveCurrentSession();
   } else {
     loadingDiv.classList.remove('thinking-indicator');
     loadingDiv.textContent = 'Error on all fallback models: ' + (lastError?.message || JSON.stringify(lastError));
@@ -234,6 +236,7 @@ function renderFormattedContent(container, markdownText, thoughtText = null) {
 
   chatBox.scrollTop = chatBox.scrollHeight;
 }
+
 // Database Initialization (IndexedDB)
 let db;
 let currentSessionId = Date.now().toString();
@@ -259,22 +262,33 @@ const overlay = document.getElementById('sidebar-overlay');
 const newChatBtn = document.getElementById('new-chat-btn');
 const historyList = document.getElementById('history-list');
 
-menuBtn.addEventListener('click', () => {
-  sidebar.classList.add('open');
-  overlay.classList.add('active');
-});
+if (menuBtn) {
+  menuBtn.addEventListener('click', () => {
+    sidebar.classList.add('open');
+    overlay.classList.add('active');
+  });
+}
 
-overlay.addEventListener('click', () => {
-  sidebar.classList.remove('open');
-  overlay.classList.remove('active');
-});
+if (overlay) {
+  overlay.addEventListener('click', () => {
+    sidebar.classList.remove('open');
+    overlay.classList.remove('active');
+  });
+}
 
 // Save current session to IndexedDB
 function saveCurrentSession() {
   if (!db || chatHistory.length === 0) return;
 
   const firstUserMsg = chatHistory.find(m => m.role === 'user');
-  const title = firstUserMsg ? firstUserMsg.parts[0].text.slice(0, 30) + '...' : 'New Chat';
+  let title = 'New Chat';
+  
+  if (firstUserMsg && firstUserMsg.parts) {
+    const textPart = firstUserMsg.parts.find(p => p.text);
+    if (textPart) {
+      title = textPart.text.slice(0, 30) + (textPart.text.length > 30 ? '...' : '');
+    }
+  }
 
   const tx = db.transaction('sessions', 'readwrite');
   const store = tx.objectStore('sessions');
@@ -291,13 +305,13 @@ function saveCurrentSession() {
 
 // Fetch and render sidebar history list
 function loadHistoryList() {
-  if (!db) return;
+  if (!db || !historyList) return;
   const tx = db.transaction('sessions', 'readonly');
   const store = tx.objectStore('sessions');
-  const request = store.getAll();
+  const getRequest = store.getAll();
 
-  request.onsuccess = () => {
-    const sessions = request.result.sort((a, b) => b.timestamp - a.timestamp);
+  getRequest.onsuccess = () => {
+    const sessions = getRequest.result.sort((a, b) => b.timestamp - a.timestamp);
     historyList.innerHTML = '';
 
     sessions.forEach(session => {
@@ -327,21 +341,28 @@ function loadHistoryList() {
 function loadSession(id) {
   const tx = db.transaction('sessions', 'readonly');
   const store = tx.objectStore('sessions');
-  const request = store.get(id);
+  const getRequest = store.get(id);
 
-  request.onsuccess = () => {
-    const session = request.result;
+  getRequest.onsuccess = () => {
+    const session = getRequest.result;
     if (!session) return;
 
     currentSessionId = session.id;
     chatHistory = session.messages;
 
-    const chatContainer = document.getElementById('chat-container');
-    chatContainer.innerHTML = '';
+    chatBox.innerHTML = '';
 
     // Re-render each message into container
     chatHistory.forEach(msg => {
-      const msgDiv = appendMessage(msg.parts[0].text, msg.role === 'user' ? 'user' : 'ai');
+      const sender = msg.role === 'user' ? 'user' : 'ai';
+      const text = msg.parts ? msg.parts.map(p => p.text || '').join('\n') : '';
+      
+      if (sender === 'user') {
+        appendMessage(text, 'user');
+      } else {
+        const msgDiv = appendMessage('', 'ai');
+        renderFormattedContent(msgDiv, text);
+      }
     });
 
     sidebar.classList.remove('open');
@@ -366,10 +387,12 @@ function deleteSession(id) {
 function startNewChat() {
   currentSessionId = Date.now().toString();
   chatHistory = [];
-  document.getElementById('chat-container').innerHTML = '';
-  sidebar.classList.remove('open');
-  overlay.classList.remove('active');
+  chatBox.innerHTML = '';
+  if (sidebar) sidebar.classList.remove('open');
+  if (overlay) overlay.classList.remove('active');
   loadHistoryList();
 }
 
-newChatBtn.addEventListener('click', startNewChat);
+if (newChatBtn) {
+  newChatBtn.addEventListener('click', startNewChat);
+}
