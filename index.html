@@ -33,6 +33,24 @@
       <button id="clear-chat-btn">Clear</button>
       <button id="clear-key-btn">Key</button>
     </div>
+    <!-- Inside your header bar -->
+<div class="header-left">
+  <button id="menu-btn" class="icon-btn">☰</button>
+  <span class="app-title">Gemini</span>
+</div>
+
+<!-- Add Sidebar Overlay and Drawer right below header -->
+<div id="sidebar-overlay" class="overlay"></div>
+<aside id="sidebar" class="sidebar">
+  <div class="sidebar-header">
+    <h3>Chat History</h3>
+    <button id="new-chat-btn" class="primary-btn">+ New Chat</button>
+  </div>
+  <div id="history-list" class="history-list">
+    <!-- Saved sessions will be dynamically rendered here -->
+  </div>
+</aside>
+    
   </header>
 
   <div id="chat-box"></div>
