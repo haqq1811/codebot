@@ -263,4 +263,52 @@ button.send-btn {
   background: #3d3d3d;
   color: #ffffff;
 }
+/* Animated Three-Dot Loader */
+.thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.thinking-dots span {
+  width: 6px;
+  height: 6px;
+  background-color: #aaa;
+  border-radius: 50%;
+  animation: dot-bounce 1.4s infinite ease-in-out both;
+}
+.thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+.thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes dot-bounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1.0); }
+}
+
+/* Claude-style Thinking Dropdown */
+.thought-container {
+  margin-bottom: 10px;
+  border-left: 2px solid #444;
+  padding-left: 10px;
+}
+.thought-toggle {
+  font-size: 0.8rem;
+  color: #888;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.thought-toggle:hover { color: #ccc; }
+.thought-content {
+  display: none;
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color: #a0a0a0;
+  white-space: pre-wrap;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 10px;
+  border-radius: 6px;
+}
 
