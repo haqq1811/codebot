@@ -234,3 +234,142 @@ function renderFormattedContent(container, markdownText, thoughtText = null) {
 
   chatBox.scrollTop = chatBox.scrollHeight;
 }
+// Database Initialization (IndexedDB)
+let db;
+let currentSessionId = Date.now().toString();
+
+const request = indexedDB.open('ChatHistoryDB', 1);
+
+request.onupgradeneeded = (e) => {
+  db = e.target.result;
+  if (!db.objectStoreNames.contains('sessions')) {
+    db.createObjectStore('sessions', { keyPath: 'id' });
+  }
+};
+
+request.onsuccess = (e) => {
+  db = e.target.result;
+  loadHistoryList();
+};
+
+// UI Elements & Sidebar Toggles
+const menuBtn = document.getElementById('menu-btn');
+const sidebar = document.getElementById('sidebar');
+const overlay = document.getElementById('sidebar-overlay');
+const newChatBtn = document.getElementById('new-chat-btn');
+const historyList = document.getElementById('history-list');
+
+menuBtn.addEventListener('click', () => {
+  sidebar.classList.add('open');
+  overlay.classList.add('active');
+});
+
+overlay.addEventListener('click', () => {
+  sidebar.classList.remove('open');
+  overlay.classList.remove('active');
+});
+
+// Save current session to IndexedDB
+function saveCurrentSession() {
+  if (!db || chatHistory.length === 0) return;
+
+  const firstUserMsg = chatHistory.find(m => m.role === 'user');
+  const title = firstUserMsg ? firstUserMsg.parts[0].text.slice(0, 30) + '...' : 'New Chat';
+
+  const tx = db.transaction('sessions', 'readwrite');
+  const store = tx.objectStore('sessions');
+  
+  store.put({
+    id: currentSessionId,
+    title: title,
+    messages: chatHistory,
+    timestamp: Date.now()
+  });
+
+  tx.oncomplete = () => loadHistoryList();
+}
+
+// Fetch and render sidebar history list
+function loadHistoryList() {
+  if (!db) return;
+  const tx = db.transaction('sessions', 'readonly');
+  const store = tx.objectStore('sessions');
+  const request = store.getAll();
+
+  request.onsuccess = () => {
+    const sessions = request.result.sort((a, b) => b.timestamp - a.timestamp);
+    historyList.innerHTML = '';
+
+    sessions.forEach(session => {
+      const item = document.createElement('div');
+      item.className = `history-item ${session.id === currentSessionId ? 'active' : ''}`;
+      
+      const titleSpan = document.createElement('span');
+      titleSpan.textContent = session.title;
+      titleSpan.onclick = () => loadSession(session.id);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'delete-btn';
+      delBtn.textContent = '✕';
+      delBtn.onclick = (e) => {
+        e.stopPropagation();
+        deleteSession(session.id);
+      };
+
+      item.appendChild(titleSpan);
+      item.appendChild(delBtn);
+      historyList.appendChild(item);
+    });
+  };
+}
+
+// Load session into current chat view
+function loadSession(id) {
+  const tx = db.transaction('sessions', 'readonly');
+  const store = tx.objectStore('sessions');
+  const request = store.get(id);
+
+  request.onsuccess = () => {
+    const session = request.result;
+    if (!session) return;
+
+    currentSessionId = session.id;
+    chatHistory = session.messages;
+
+    const chatContainer = document.getElementById('chat-container');
+    chatContainer.innerHTML = '';
+
+    // Re-render each message into container
+    chatHistory.forEach(msg => {
+      const msgDiv = appendMessage(msg.parts[0].text, msg.role === 'user' ? 'user' : 'ai');
+    });
+
+    sidebar.classList.remove('open');
+    overlay.classList.remove('active');
+    loadHistoryList();
+  };
+}
+
+// Delete session
+function deleteSession(id) {
+  const tx = db.transaction('sessions', 'readwrite');
+  const store = tx.objectStore('sessions');
+  store.delete(id);
+
+  tx.oncomplete = () => {
+    if (id === currentSessionId) startNewChat();
+    else loadHistoryList();
+  };
+}
+
+// Start New Chat
+function startNewChat() {
+  currentSessionId = Date.now().toString();
+  chatHistory = [];
+  document.getElementById('chat-container').innerHTML = '';
+  sidebar.classList.remove('open');
+  overlay.classList.remove('active');
+  loadHistoryList();
+}
+
+newChatBtn.addEventListener('click', startNewChat);
