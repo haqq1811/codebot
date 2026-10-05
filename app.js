@@ -15,6 +15,10 @@ const MAX_INLINE_BYTES = 19 * 1024 * 1024; // Gemini accepts ~20 MB of inline da
 const TITLE_MAX = 30;
 const STICK_THRESHOLD = 80;                 // px from the bottom that still counts as "following" the chat
 const STREAM_PAINT_MS = 80;
+const THUMB_SIZE = 192;                     // px; shown at ~60px, so it stays sharp on 3x phone screens
+
+// Which sprite icon fills the thumbnail tile when there is no picture
+const KIND_ICON = { image: 'image', video: 'play', audio: 'music', text: 'code', pdf: 'file', file: 'file' };
 
 // Text-like files are sent as text parts (works for any model, no MIME guessing needed)
 const TEXT_EXTENSIONS = new Set([
@@ -46,7 +50,7 @@ const els = {
   attachBtn: $('attach-btn'),
   fileInput: $('file-input'),
   filePreviewBar: $('file-preview-bar'),
-  fileChipList: $('file-chip-list'),
+  thumbStrip: $('thumb-strip'),
   fileNameDisplay: $('file-name-display'),
   removeFileBtn: $('remove-file-btn'),
   modelSelect: $('model-select'),
@@ -249,10 +253,28 @@ function removeKey() {
 
 /* ---------- 5. Attachments ---------- */
 
+const mimeFor = (file) => file.type || MIME_BY_EXT[getExt(file.name)] || 'application/octet-stream';
+
 const isTextFile = (file) =>
   file.type.startsWith('text/') ||
   /json|xml|javascript|yaml|x-sh/.test(file.type) ||
   TEXT_EXTENSIONS.has(getExt(file.name));
+
+/** What the thumbnail shows. Order matters: browsers report ".ts" source files as video/mp2t. */
+function fileKind(file) {
+  const mime = mimeFor(file);
+  if (mime.startsWith('image/')) return 'image';
+  if (isTextFile(file)) return 'text';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  if (mime === 'application/pdf') return 'pdf';
+  return 'file';
+}
+
+function extLabel(file, kind) {
+  const fallback = { image: 'IMG', video: 'VID', audio: 'AUD', pdf: 'PDF', text: 'TXT' }[kind] || 'FILE';
+  return getExt(file.name).toUpperCase().slice(0, 5) || fallback;
+}
 
 function readFile(file, mode) {
   return new Promise((resolve, reject) => {
@@ -264,24 +286,97 @@ function readFile(file, mode) {
   });
 }
 
-async function buildAttachment(file) {
-  const base = { id: ++nextAttachmentId, name: file.name, size: file.size };
-
+/** The piece of the request this file turns into: text for code/text files, base64 for everything else. */
+async function buildPart(file) {
   if (isTextFile(file)) {
     const text = await readFile(file, 'text');
-    return { ...base, part: { text: `File: ${file.name}\n\`\`\`\n${text}\n\`\`\`` }, bytes: text.length };
+    return { part: { text: `File: ${file.name}\n\`\`\`\n${text}\n\`\`\`` }, bytes: text.length };
   }
-
   const dataUrl = await readFile(file, 'dataURL');
   const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
-  const mimeType = file.type || MIME_BY_EXT[getExt(file.name)] || 'application/octet-stream';
-  return {
-    ...base,
-    part: { inlineData: { data, mimeType } },
-    bytes: data.length,
-    previewUrl: mimeType.startsWith('image/') ? URL.createObjectURL(file) : null,
-  };
+  return { part: { inlineData: { data, mimeType: mimeFor(file) } }, bytes: data.length };
 }
+
+/* --- thumbnails: a small JPEG drawn on a canvas, so 30 photos never sit in memory at full size --- */
+
+function drawThumb(source, width, height) {
+  if (!width || !height) return null;
+  const scale = Math.min(1, THUMB_SIZE / Math.max(width, height));
+  const canvas = el('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#2b2b2b'; // transparent PNGs get the input colour behind them
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.82);
+}
+
+async function imageThumb(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return drawThumb(img, img.naturalWidth || 300, img.naturalHeight || 300);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Grabs a frame from the video. Gives up after a few seconds and lets the icon tile stand in. */
+function videoThumb(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = el('video');
+    let timer = 0;
+    const done = (thumb) => {
+      clearTimeout(timer);
+      video.removeAttribute('src');
+      video.load();
+      URL.revokeObjectURL(url);
+      resolve(thumb);
+    };
+    timer = setTimeout(() => done(null), 6000);
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.addEventListener('error', () => done(null), { once: true });
+    video.addEventListener('loadedmetadata', () => {
+      video.currentTime = Math.min(0.5, (video.duration || 1) / 2);
+    }, { once: true });
+    video.addEventListener('seeked', () => {
+      try { done(drawThumb(video, video.videoWidth, video.videoHeight)); } catch { done(null); }
+    }, { once: true });
+    video.src = url;
+  });
+}
+
+function makeThumb(file, kind) {
+  const work = kind === 'image' ? imageThumb(file) : kind === 'video' ? videoThumb(file) : null;
+  return Promise.resolve(work).catch(() => null); // undecodable (e.g. HEIC on desktop): icon tile instead
+}
+
+/** One thumbnail picture, or an icon tile with the file extension when there is no picture. Used while composing and in sent messages. */
+function thumbMedia({ thumb = null, kind = 'file', ext = 'FILE' }) {
+  const media = el('div', `thumb-media kind-${kind}`);
+  if (thumb) {
+    const img = el('img');
+    img.src = thumb;
+    img.alt = '';
+    img.draggable = false;
+    media.append(img);
+    if (kind === 'video') media.append(el('span', 'thumb-badge'));
+    if (kind === 'video') media.lastChild.append(icon('play'));
+  } else {
+    media.classList.add('is-tile');
+    media.append(icon(KIND_ICON[kind] ?? 'file'), el('span', 'thumb-ext', ext));
+  }
+  return media;
+}
+
+/* --- the attachment list --- */
 
 /** Accepts a FileList or array. Safe to call many times: selections accumulate. */
 function addFiles(fileList) {
@@ -289,20 +384,38 @@ function addFiles(fileList) {
   if (!files.length) return;
 
   const job = (async () => {
-    renderAttachments();
+    const staged = [];
     let skipped = 0;
+
     for (const file of files) {
       const key = `${file.name}|${file.size}|${file.lastModified}`;
       if (state.attachments.some((a) => a.key === key)) { skipped++; continue; }
       if (file.size > MAX_INLINE_BYTES) { toast(`${file.name} is over the ${formatBytes(MAX_INLINE_BYTES)} limit.`); continue; }
+
+      const kind = fileKind(file);
+      const att = {
+        id: ++nextAttachmentId, key, kind,
+        name: file.name, size: file.size, ext: extLabel(file, kind),
+        thumb: null, part: null, bytes: 0, loading: true,
+      };
+      state.attachments.push(att);
+      staged.push({ att, file });
+    }
+    renderAttachments(); // every tile appears at once, with a spinner until it is ready
+
+    for (const { att, file } of staged) {
       try {
-        state.attachments.push({ ...(await buildAttachment(file)), key });
-        renderAttachments();
+        const [thumb, built] = await Promise.all([makeThumb(file, att.kind), buildPart(file)]);
+        if (!state.attachments.includes(att)) continue; // removed while it was loading
+        Object.assign(att, { thumb, part: built.part, bytes: built.bytes, loading: false });
       } catch (err) {
         console.warn('Could not read file:', file.name, err);
+        state.attachments = state.attachments.filter((a) => a !== att);
         toast(`Could not read ${file.name}.`);
       }
+      renderAttachments();
     }
+
     if (skipped) toast(`${skipped} file(s) were already attached.`);
     if (estimateBytes(state.history) + pendingBytes() > MAX_INLINE_BYTES) {
       toast('Attachments are over the size limit. Remove some before sending.', 4500);
@@ -315,54 +428,71 @@ function addFiles(fileList) {
 
 const pendingBytes = () => state.attachments.reduce((sum, a) => sum + a.bytes, 0);
 
-function releaseAttachment(att) {
-  if (att.previewUrl) URL.revokeObjectURL(att.previewUrl);
-}
-
 function removeAttachment(id) {
-  const att = state.attachments.find((a) => a.id === id);
-  if (att) releaseAttachment(att);
   state.attachments = state.attachments.filter((a) => a.id !== id);
   renderAttachments();
 }
 
 function clearAttachments() {
-  state.attachments.forEach(releaseAttachment);
   state.attachments = [];
   els.fileInput.value = '';
   renderAttachments();
 }
 
+const thumbNodes = new Map(); // attachment id -> its DOM node, so existing thumbnails aren't rebuilt on every update
+
+function buildThumb(att) {
+  const node = el('div', 'thumb');
+  node.setAttribute('role', 'listitem');
+  node.setAttribute('aria-label', att.name);
+  node.title = att.name; // the name only shows on hover; the thumbnail is what you see
+
+  const remove = el('button', 'thumb-remove');
+  remove.type = 'button';
+  remove.setAttribute('aria-label', `Remove ${att.name}`);
+  remove.append(icon('close'));
+  remove.addEventListener('click', () => removeAttachment(att.id));
+
+  node.append(thumbMedia(att), remove);
+  node._thumb = att.thumb;
+  return node;
+}
+
+function updateThumb(node, att) {
+  node.classList.toggle('is-loading', att.loading);
+  if (node._thumb !== att.thumb) { // the picture arrived: swap the icon tile for it
+    node.firstChild.replaceWith(thumbMedia(att));
+    node._thumb = att.thumb;
+  }
+}
+
 function renderAttachments() {
+  const live = new Set(state.attachments.map((a) => a.id));
+  for (const [id, node] of thumbNodes) {
+    if (!live.has(id)) { node.remove(); thumbNodes.delete(id); }
+  }
+
+  let added = false;
+  for (const att of state.attachments) {
+    let node = thumbNodes.get(att.id);
+    if (!node) {
+      node = buildThumb(att);
+      thumbNodes.set(att.id, node);
+      els.thumbStrip.append(node);
+      added = true;
+    }
+    updateThumb(node, att);
+  }
   const count = state.attachments.length;
-  const reading = state.pendingReads.size > 0;
-
-  els.fileChipList.replaceChildren(
-    ...state.attachments.map((att) => {
-      const chip = el('div', 'file-chip');
-      if (att.previewUrl) {
-        const img = el('img');
-        img.src = att.previewUrl;
-        img.alt = '';
-        chip.append(img);
-      }
-      const remove = el('button');
-      remove.type = 'button';
-      remove.setAttribute('aria-label', `Remove ${att.name}`);
-      remove.append(icon('close'));
-      remove.addEventListener('click', () => removeAttachment(att.id));
-      chip.append(el('span', 'file-chip-name', att.name), el('span', 'file-chip-size', formatBytes(att.size)), remove);
-      chip.title = att.name;
-      return chip;
-    }),
-  );
-
-  els.filePreviewBar.hidden = count === 0 && !reading;
-  els.removeFileBtn.hidden = count === 0;
   const total = state.attachments.reduce((sum, a) => sum + a.size, 0);
-  els.fileNameDisplay.textContent = reading
+  const loading = state.attachments.some((a) => a.loading);
+  els.filePreviewBar.hidden = count === 0; // must be visible before scrolling: a hidden box has no scroll width
+  els.removeFileBtn.hidden = count === 0;
+  els.fileNameDisplay.textContent = loading
     ? 'Reading files…'
     : `Attached: ${count} file(s), ${formatBytes(total)}`;
+
+  if (added) els.thumbStrip.scrollLeft = els.thumbStrip.scrollWidth; // keep the newest in view
 }
 
 function estimateBytes(contents) {
@@ -393,30 +523,37 @@ if (typeof DOMPurify !== 'undefined') {
   });
 }
 
-/** Adds syntax highlighting, copy buttons and scrollable tables to rendered Markdown. */
+/**
+ * Colors a code cell using the language on its fence (```python). Unlabeled fences stay plain on purpose:
+ * highlight.js's auto-detect guesses wrong on short snippets and would color plain output.
+ */
+function highlightCode(code, lang) {
+  try {
+    if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) hljs.highlightElement(code);
+  } catch { /* highlighter missing or language unknown: leave it plain */ }
+}
+
+/** Highlights code cells, pins a Copy button to each one's top-right corner, and makes tables scroll sideways. */
 function enhanceContent(root) {
   root.querySelectorAll('pre').forEach((pre) => {
     if (pre.parentElement.classList.contains('code-block')) return;
     const code = pre.querySelector('code');
+    const lang = code?.className.match(/language-([\w+#-]+)/)?.[1] || '';
+    if (code) highlightCode(code, lang);
 
-    if (code && typeof hljs !== 'undefined') {
-      try { hljs.highlightElement(code); } catch { /* unknown language: leave plain */ }
-    }
-
-    const language = code?.className.match(/language-([\w+#-]+)/)?.[1] || 'code';
     const copy = el('button', 'copy-btn', 'Copy');
     copy.type = 'button';
+    copy.setAttribute('aria-label', 'Copy code');
     copy.addEventListener('click', async () => {
       const ok = await copyText((code ?? pre).textContent);
       copy.textContent = ok ? 'Copied!' : 'Copy failed';
       setTimeout(() => { copy.textContent = 'Copy'; }, 2000);
     });
 
-    const bar = el('div', 'code-bar');
-    bar.append(el('span', '', language), copy);
+    // The button lives on the wrapper, not inside the scrolling <pre>, so it stays put while long lines scroll.
     const wrapper = el('div', 'code-block');
     pre.replaceWith(wrapper);
-    wrapper.append(bar, pre);
+    wrapper.append(el('span', 'code-lang', lang || 'code'), copy, pre);
   });
 
   root.querySelectorAll('table').forEach((table) => {
@@ -453,10 +590,11 @@ function renderUserMessage({ text = '', files = [] }) {
   const msg = createMessage('user');
   if (files.length) {
     const list = el('div', 'msg-files');
-    files.forEach((f) => {
-      const chip = el('span', 'msg-file');
-      chip.append(icon('file'), el('span', '', f.name));
-      list.append(chip);
+    files.forEach((file) => {
+      const thumb = el('div', 'msg-thumb');
+      thumb.title = file.name;
+      thumb.append(thumbMedia(file));
+      list.append(thumb);
     });
     msg.append(list);
   }
@@ -512,7 +650,7 @@ function renderAssistant(msg, data, { final = false, note = '' } = {}) {
   parts.body.hidden = !hasText;
   if (hasText) {
     parts.body.innerHTML = renderMarkdown(text);
-    if (final) enhanceContent(parts.body);
+    enhanceContent(parts.body);
   }
 
   const label = model ? (note ? `${model} (${note})` : model) : note;
@@ -538,7 +676,12 @@ function deriveUi(history) {
     const parts = turn.parts ?? [];
     const text = parts.filter((p) => p.text).map((p) => p.text).join('\n');
     if (turn.role === 'user') {
-      const files = parts.filter((p) => p.inlineData).map((_, i) => ({ name: `Attachment ${i + 1}` }));
+      const files = parts.filter((p) => p.inlineData).map((p, i) => {
+        const mime = p.inlineData.mimeType || '';
+        const [type, subtype = ''] = mime.split('/');
+        const kind = ['image', 'video', 'audio'].includes(type) ? type : mime === 'application/pdf' ? 'pdf' : 'file';
+        return { name: `Attachment ${i + 1}`, kind, ext: subtype.toUpperCase().slice(0, 5) || 'FILE' };
+      });
       return { role: 'user', text, files };
     }
     return { role: 'ai', text };
@@ -573,7 +716,11 @@ async function sendMessage() {
     return;
   }
 
-  const ui = { role: 'user', text, files: state.attachments.map(({ name, size }) => ({ name, size })) };
+  const ui = {
+    role: 'user',
+    text,
+    files: state.attachments.map(({ name, size, kind, ext, thumb }) => ({ name, size, kind, ext, thumb })),
+  };
 
   document.querySelectorAll('.retry-btn').forEach((btn) => btn.remove());
   renderUserMessage(ui);
