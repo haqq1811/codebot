@@ -8,9 +8,18 @@
    Bump CACHE_VERSION to make every device drop its saved copies on the next visit.
    ========================================================================== */
 
-const CACHE_VERSION = 'v4';
+// NEW CODE
+const CACHE_VERSION = 'v5';
 const CACHE = `gemini-studio-${CACHE_VERSION}`;
-const APP_SHELL = ['./', './index.html', './app.js', './style.css', './manifest.json'];
+const APP_SHELL = [
+  './',
+  './index.html',
+  './app.js',
+  './engine.js',
+  './storage.js',
+  './style.css',
+  './manifest.json'
+];
 
 // Saved copies from earlier versions of this app (any cache with "gemini" in its name) are cleaned up.
 // Caches belonging to other sites on the same domain are left alone.
