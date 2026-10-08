@@ -181,54 +181,98 @@ function makeThrottle(fn, wait) {
 }
 
 const modelIds = () => [...els.modelSelect.options].map((o) => o.value);
+/* ---------- 3.5 Catalog & Model Dropdown ---------- */
 
-/* ---------- 4. API key ---------- */
+async function refreshCatalogs() {
+  const keys = keyStore.all();
 
-async function initAI(key) {
-  // Loaded on demand so the rest of the app still works if the CDN is unreachable
-  genaiModule ??= import('@google/genai');
-  try {
-    const { GoogleGenAI } = await genaiModule;
-    state.ai = new GoogleGenAI({ apiKey: key });
-  } catch (err) {
-    genaiModule = null;
-    state.ai = null;
-    throw err;
+  // 1. Fetch OpenRouter models if key is present
+  if (keys.openrouter) {
+    try {
+      const models = await fetchOpenRouterModels();
+      const ordered = orderOpenRouterModels(models);
+      setCatalog('openrouter', ordered);
+      saveCatalogCache('openrouter', ordered);
+    } catch (err) {
+      console.warn('Could not refresh OpenRouter catalog:', err);
+    }
+  }
+
+  // 2. Fetch Gemini models if key is present
+  if (keys.gemini) {
+    try {
+      const models = await fetchGeminiModels(keys.gemini);
+      const ordered = orderGeminiModels(models);
+      setCatalog('gemini', ordered);
+      saveCatalogCache('gemini', ordered);
+    } catch (err) {
+      console.warn('Could not refresh Gemini catalog:', err);
+    }
+  }
+
+  renderModelDropdown();
+}
+
+function renderModelDropdown() {
+  const select = els.modelSelect;
+  select.replaceChildren();
+
+  // Load from catalog or cache
+  const cached = loadCatalogCache();
+  const geminiModels = getCatalog('gemini').length ? getCatalog('gemini') : (cached.gemini?.models || GEMINI_DEFAULTS);
+  const openrouterModels = getCatalog('openrouter').length ? getCatalog('openrouter') : (cached.openrouter?.models || []);
+
+  // Gemini Group
+  if (geminiModels.length) {
+    const group = el('optgroup');
+    group.label = 'Google AI Studio';
+    geminiModels.forEach((m) => {
+      const opt = el('option', '', m.label || m.id);
+      opt.value = modelValue('gemini', m.id);
+      group.append(opt);
+    });
+    select.append(group);
+  }
+
+  // OpenRouter Group
+  if (openrouterModels.length) {
+    const group = el('optgroup');
+    group.label = 'OpenRouter';
+    openrouterModels.forEach((m) => {
+      const label = m.free ? `${m.label} (Free)` : m.label;
+      const opt = el('option', '', label);
+      opt.value = modelValue('openrouter', m.id);
+      group.append(opt);
+    });
+    select.append(group);
+  }
+
+  // Restore saved choice or default
+  const saved = store.get(STORAGE.model);
+  if (saved && modelIds().includes(saved)) {
+    select.value = saved;
   }
 }
 
-async function ensureAI() {
-  if (state.ai) return true;
-  const key = store.get(STORAGE.apiKey);
-  if (!key) return false;
-  await initAI(key);
-  return true;
-}
 
-/** Resolves true when a client is ready; otherwise tells the user what to do. */
-async function requireAI() {
-  try {
-    if (await ensureAI()) return true;
-  } catch (err) {
-    console.warn('SDK load failed:', err);
-    toast('Could not load the Gemini SDK. Check your connection.');
-    return false;
-  }
-  toast("Set your API key first.");
-  openKeyModal();
-  return false;
-}
+/* ---------- 4. API keys & Modal ---------- */
+
+// Extra DOM elements for OpenRouter Key (make sure you add an input with id="openrouter-key-input" in HTML or use this)
+const elsKeys = {
+  geminiInput: els.apiKeyInput,
+  openrouterInput: $('openrouter-key-input') // Add <input id="openrouter-key-input"> in your key-modal HTML
+};
 
 function openKeyModal() {
   lastFocus = document.activeElement;
-  const saved = store.get(STORAGE.apiKey);
-  els.apiKeyInput.value = saved || '';
-  els.apiKeyInput.type = 'password';
+  const keys = keyStore.all();
+  
+  if (elsKeys.geminiInput) elsKeys.geminiInput.value = keys.gemini || '';
+  if (elsKeys.openrouterInput) elsKeys.openrouterInput.value = keys.openrouter || '';
+  
   els.toggleKeyBtn.textContent = 'Show';
-  els.toggleKeyBtn.setAttribute('aria-pressed', 'false');
-  els.removeKeyBtn.hidden = !saved;
   els.keyModal.hidden = false;
-  els.apiKeyInput.focus();
+  if (elsKeys.geminiInput) elsKeys.geminiInput.focus();
 }
 
 function closeKeyModal() {
@@ -238,29 +282,39 @@ function closeKeyModal() {
 }
 
 async function saveKey() {
-  const key = els.apiKeyInput.value.trim().replace(/^["']|["']$/g, '');
-  if (!key) { toast('Paste your API key first.'); return; }
-  store.set(STORAGE.apiKey, key);
-  state.ai = null;
-  try {
-    await initAI(key);
-    closeKeyModal();
-    syncEmptyState();
-    toast('API key saved.');
-  } catch (err) {
-    console.warn('SDK load failed:', err);
-    closeKeyModal();
-    toast('Key saved, but the Gemini SDK could not load. Check your connection.');
-  }
+  const geminiVal = elsKeys.geminiInput ? elsKeys.geminiInput.value.trim() : '';
+  const openrouterVal = elsKeys.openrouterInput ? elsKeys.openrouterInput.value.trim() : '';
+
+  if (geminiVal) keyStore.set('gemini', geminiVal);
+  else keyStore.remove('gemini');
+
+  if (openrouterVal) keyStore.set('openrouter', openrouterVal);
+  else keyStore.remove('openrouter');
+
+  closeKeyModal();
+  toast('Updating model catalogs...');
+  
+  // Re-initialize catalogs with the new keys
+  await refreshCatalogs();
+  syncEmptyState();
 }
 
 function removeKey() {
-  store.remove(STORAGE.apiKey);
-  state.ai = null;
+  keyStore.remove('gemini');
+  keyStore.remove('openrouter');
   closeKeyModal();
+  refreshCatalogs();
   syncEmptyState();
-  toast('API key removed.');
+  toast('API keys removed.');
 }
+
+function syncEmptyState() {
+  const keys = keyStore.all();
+  const hasAnyKey = Boolean(keys.gemini || keys.openrouter);
+  els.emptyState.hidden = Boolean(els.chatBox.querySelector('.msg'));
+  els.emptyKeyBtn.hidden = hasAnyKey;
+}
+
 
 /* ---------- 5. Attachments ---------- */
 
@@ -745,41 +799,90 @@ async function sendMessage() {
 }
 
 /** One request/response cycle. `turn` = { parts, ui }. */
+/* ---------- 7. Generation (Using engine.js streamChat) ---------- */
+
 async function runTurn(turn) {
   state.abort = new AbortController();
   const { signal } = state.abort;
   setBusy(true);
 
-  state.history.push({ role: 'user', parts: turn.parts });
+  // Convert turn parts/ui to engine message format
+  const userMessage = {
+    role: 'user',
+    content: turn.ui.text,
+    files: state.attachments.map(a => ({
+      name: a.name,
+      size: a.size,
+      kind: a.kind,
+      ext: a.ext,
+      mime: mimeFor(a),
+      thumb: a.thumb,
+      data: a.part?.inlineData?.data || null,
+      text: a.part?.text ? a.part.text.replace(/^File: .+\n```\n([\s\S]*)\n```$/, '$1') : null
+    }))
+  };
+
+  state.history.push(userMessage);
   state.ui.push(turn.ui);
 
   const bubble = createMessage('ai');
-  setThinking(bubble, els.modelSelect.value);
+  const selectedModel = parseModelValue(els.modelSelect.value);
+  setThinking(bubble, selectedModel.id);
   renderAssistant(bubble, {});
   scrollToBottom(true);
 
-  const result = { text: '', thoughts: '', model: '', finishReason: '', blockReason: '' };
+  const result = { text: '', thoughts: '', model: selectedModel.id, finishReason: '' };
   const paint = makeThrottle(() => { renderAssistant(bubble, result); scrollToBottom(); }, STREAM_PAINT_MS);
 
   let failure = null;
+
   try {
-    await generateWithFallback(result, {
-      signal,
-      onStatus: (model) => { if (!result.text && !result.thoughts) setThinking(bubble, model); },
-      onUpdate: paint,
+    const stream = streamChat({
+      messages: state.history,
+      system: DEFAULT_SYSTEM_PROMPT,
+      selected: selectedModel,
+      keys: keyStore.all(),
+      signal
     });
+
+    for await (const chunk of stream) {
+      if (chunk.type === 'status') {
+        result.model = chunk.model;
+        if (!result.text && !result.thoughts) setThinking(bubble, chunk.model);
+      } else if (chunk.type === 'text') {
+        result.text += chunk.delta;
+        paint();
+      } else if (chunk.type === 'thought') {
+        result.thoughts += chunk.delta;
+        paint();
+      } else if (chunk.type === 'fallback') {
+        toast(`Switched from ${chunk.from.model} to ${chunk.to.model} (${chunk.reason})`, 4000);
+      } else if (chunk.type === 'notice') {
+        toast(chunk.message, 4000);
+      } else if (chunk.type === 'done') {
+        result.finishReason = chunk.finishReason;
+      }
+    }
   } catch (err) {
     failure = err;
   }
-  paint.cancel();
 
+  paint.cancel();
   const stopped = signal.aborted;
   state.abort = null;
   setBusy(false);
 
-  if (result.text.trim()) {
-    state.history.push({ role: 'model', parts: [{ text: result.text }] });
+  if (result.text.trim() || result.thoughts.trim()) {
+    const assistantMessage = {
+      role: 'assistant',
+      content: result.text,
+      thoughts: result.thoughts,
+      model: result.model,
+      provider: selectedModel.provider
+    };
+    state.history.push(assistantMessage);
     state.ui.push({ role: 'ai', text: result.text, thoughts: result.thoughts, model: result.model });
+    
     renderAssistant(bubble, result, { final: true, note: stopped ? 'stopped' : failure ? 'interrupted' : '' });
     if (failure && !stopped) toast(describeError(failure).message, 5000);
     scrollToBottom();
@@ -787,35 +890,12 @@ async function runTurn(turn) {
     return;
   }
 
-  // Nothing usable arrived: roll the turn back so history stays valid, and offer a retry.
+  // Rollback on complete failure
   state.history.pop();
   state.ui.pop();
   showError(bubble, turn, stopped ? null : failure ?? new Error('The model returned an empty response.'));
 }
 
-function showError(bubble, turn, err) {
-  bubble.className = 'msg ai error';
-  bubble.replaceChildren();
-  delete bubble._parts;
-
-  if (err) {
-    const { message, detail } = describeError(err);
-    bubble.append(el('div', 'error-text', message));
-    if (detail) bubble.append(el('div', 'error-detail', detail));
-  } else {
-    bubble.append(el('div', '', 'Stopped before any text arrived.'));
-  }
-
-  const retry = el('button', 'retry-btn', 'Retry');
-  retry.type = 'button';
-  retry.addEventListener('click', () => {
-    if (state.generating) return;
-    bubble.remove();
-    runTurn(turn);
-  });
-  bubble.append(retry);
-  scrollToBottom();
-}
 
 /* --- model fallback --- */
 
@@ -1202,10 +1282,11 @@ function wireDragAndDrop() {
 }
 
 function init() {
-  // Model: restore the last choice
-  const savedModel = store.get(STORAGE.model);
-  if (savedModel && modelIds().includes(savedModel)) els.modelSelect.value = savedModel;
+  // Model Dropdown Setup
+  renderModelDropdown();
+  refreshCatalogs().catch((err) => console.warn('Catalog refresh failed:', err));
   els.modelSelect.addEventListener('change', () => store.set(STORAGE.model, els.modelSelect.value));
+   
 
   // Composer
   els.sendBtn.addEventListener('click', () => (state.generating ? stopGeneration() : sendMessage()));
