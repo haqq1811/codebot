@@ -5,6 +5,17 @@
    ========================================================================== */
 
 /* ---------- 1. Config ---------- */
+// At the top of app.js
+import { keyStore, loadCatalogCache, saveCatalogCache, dbGet, dbPut } from './storage.js';
+import { 
+  streamChat, 
+  fetchOpenRouterModels, 
+  fetchGeminiModels, 
+  setCatalog, 
+  orderOpenRouterModels, 
+  orderGeminiModels,
+  parseModelValue 
+} from './engine.js';
 
 const STORAGE = { apiKey: 'GEMINI_API_KEY', model: 'GEMINI_MODEL', sidebar: 'GEMINI_SIDEBAR_OPEN' };
 const DB_NAME = 'ChatHistoryDB';
