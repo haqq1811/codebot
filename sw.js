@@ -9,7 +9,7 @@
    ========================================================================== */
 
 // NEW CODE
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const CACHE = `gemini-studio-${CACHE_VERSION}`;
 const APP_SHELL = [
   './',
