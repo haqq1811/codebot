@@ -880,3 +880,18 @@ body.dragging #main::after {
     transition-delay: 0s !important;
   }
 }
+
+
+/* ==========================================================================
+   Multi-provider additions
+   ========================================================================== */
+
+/* Long OpenRouter names must not push the header buttons off-screen */
+.model-select { min-width: 0; }
+@media (min-width: 600px) { .model-select { max-width: 16rem; } }
+.model-select option,
+.model-select optgroup { background: #2a2a2a; color: #eee; font-weight: 400; }
+
+/* Key modal: one labelled field per provider */
+.key-label { margin-top: 4px; font-size: .8rem; font-weight: 600; color: var(--text-dim); }
+.key-label a { font-weight: 400; }

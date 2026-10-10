@@ -1,507 +1,406 @@
 /* ==========================================================================
-   engine.js: provider-agnostic chat engine. No DOM, no storage, plain fetch + streams.
+   engine.js — one chat engine, several providers
+   streamChat() talks to Google AI Studio (Gemini) or OpenRouter over plain
+   fetch + SSE (no SDK) and yields the same chunk types for both, so app.js
+   never needs to know which provider answered.
 
-   Conversation format used everywhere (and saved as-is in IndexedDB):
-     { role: 'user' | 'assistant', content: 'text', files?: [...], thoughts?, model?, provider? }
-   Each provider adapter converts it to its own wire format just before a request:
-     Gemini      -> contents: [{ role, parts: [...] }]            (+ systemInstruction)
-     OpenRouter  -> messages: [{ role, content }]  (OpenAI style)
+   Chunks yielded by streamChat():
+     { type: 'status',   provider, model }
+     { type: 'text',     delta }
+     { type: 'thought',  delta }
+     { type: 'fallback', from: {provider, model}, to: {provider, model}, reason }
+     { type: 'notice',   message }
+     { type: 'done',     finishReason }
 
-   Sections: 1 Config · 2 Errors · 3 Catalog · 4 Context window · 5 Adapters · 6 Fallback router
+   Messages (what app.js keeps in state.history):
+     { role: 'user',      content, files?: [{ name, mime, data?, text? }] }
+     { role: 'assistant', content }
+   `data` is base64, `text` is the raw text of a code/text file.
    ========================================================================== */
-
-/* ---------- 1. Config ---------- */
-
-export const PROVIDERS = {
-  gemini: { id: 'gemini', label: 'Google AI Studio' },
-  openrouter: { id: 'openrouter', label: 'OpenRouter' },
-};
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
-/** Shown until (or instead of) the live Gemini list, and used as the Gemini fallback chain. */
+const SAME_PROVIDER_FALLBACKS = 2;   // extra models tried from the same provider
+const OTHER_PROVIDER_FALLBACKS = 1;  // extra models tried from the other provider (only if it has a key)
+
+export const PROVIDERS = ['gemini', 'openrouter'];
+export const PROVIDER_NAMES = { gemini: 'Google AI Studio', openrouter: 'OpenRouter' };
+
+export const DEFAULT_SYSTEM_PROMPT =
+  'You are a helpful, accurate assistant. Reply in clean Markdown. ' +
+  'Put code in fenced blocks and always label the language, for example ```python.';
+
+/** Shown until the live model list has been fetched (or when there is no Gemini key yet). */
 export const GEMINI_DEFAULTS = [
   { id: 'gemini-3.8-flash', label: '3.8 Flash' },
   { id: 'gemini-3.5-flash-lite', label: '3.5 Flash Lite' },
   { id: 'gemini-2.5-flash', label: '2.5 Flash' },
   { id: 'gemini-2.5-pro', label: '2.5 Pro' },
 ];
-const GEMINI_CHAIN = GEMINI_DEFAULTS.map((m) => m.id);
 
-/**
- * Where a rate-limited Gemini request goes next. These are checked against OpenRouter's live model list:
- * any that no longer exist are skipped, and if none are left the newest ":free" models take their place.
- */
-export const OPENROUTER_FREE_FALLBACKS = [
-  'deepseek/deepseek-r1:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'qwen/qwen-2.5-coder-32b-instruct:free',
-];
-
-export const MAX_CONTEXT_MESSAGES = 14; // system prompt + the last 14 messages
-export const MAX_CONTEXT_CHARS = 200_000; // text budget (about 50k tokens) so small free models don't overflow
-export const DEFAULT_SYSTEM_PROMPT = 'You are a helpful assistant. Answer clearly and format replies in Markdown.';
-
-const defaultFetch = (...args) => globalThis.fetch(...args);
-
-/* ---------- 2. Errors ---------- */
-
-export class ProviderError extends Error {
-  constructor(message, { status = null, provider = '', model = '', fatal = false } = {}) {
-    super(message);
-    this.name = 'ProviderError';
-    this.status = status;
-    this.provider = provider;
-    this.model = model;
-    this.fatal = fatal; // true = another model would fail the same way, so don't fall back
-    this.network = false;
-    this.partial = false; // true = part of an answer had already streamed
-    this.previous = null; // the first failure, when a fallback also failed
-  }
-}
-
-async function httpError(response, provider, model) {
-  let message = response.statusText || `HTTP ${response.status}`;
-  try {
-    const body = await response.json();
-    const info = body?.error ?? body;
-    if (info?.message) message = info.message;
-    const raw = info?.metadata?.raw;
-    if (typeof raw === 'string' && raw) message += ` (${raw.slice(0, 200)})`;
-  } catch { /* body was not JSON */ }
-  return new ProviderError(message, { status: response.status, provider, model });
-}
-
-function toProviderError(err, candidate) {
-  if (err instanceof ProviderError) {
-    err.provider ||= candidate.provider;
-    err.model ||= candidate.id;
-    return err;
-  }
-  const wrapped = new ProviderError(err instanceof TypeError ? 'Network error' : err?.message || String(err), {
-    provider: candidate.provider,
-    model: candidate.id,
-  });
-  wrapped.network = err instanceof TypeError;
-  return wrapped;
-}
-
-const isModelUnavailable = (err) =>
-  err.status === 404 ||
-  (err.status === 400 && /model/i.test(err.message) && /not found|not supported|unsupported|invalid/i.test(err.message));
-
-const rejectsThinking = (err) => err.status === 400 && /think/i.test(err.message);
-
-/** Another model might succeed (overload, quota, missing model). A bad key or a bad payload won't. */
-function shouldFallback(err) {
-  if (err.fatal) return false;
-  if ([401, 403, 413].includes(err.status)) return false;
-  if (err.status === 400) return isModelUnavailable(err);
-  return true;
-}
-
-/** { message, detail }: a plain-language line for the UI, plus the provider's own words when they differ. */
-export function describeError(err) {
-  const provider = PROVIDERS[err.provider]?.label ?? 'The provider';
-  const { status } = err;
-  const message = err.message || String(err);
-  let friendly = null;
-
-  if (status === 401 || status === 403 || /api key/i.test(message)) {
-    friendly = `${provider} rejected your API key. Open Key and check that it is correct and enabled.`;
-  } else if (status === 402) {
-    friendly = `${provider} says the account is out of credits. Add credits or pick a free model.`;
-  } else if (status === 429) {
-    friendly = `${provider} rate limit or quota reached. Wait a moment, then retry or pick another model.`;
-  } else if (status === 503 || /overloaded|unavailable/i.test(message)) {
-    friendly = `${provider} is overloaded right now. Try again shortly.`;
-  } else if (status === 413 || /too large|exceeds the maximum/i.test(message)) {
-    friendly = 'The request is too large. Remove some files or start a new chat.';
-  } else if (err.network) {
-    friendly = 'Network error. Check your connection, then retry.';
-  }
-
-  const details = [];
-  if (friendly && friendly !== message) details.push(message);
-  if (err.previous) details.push(`First attempt (${PROVIDERS[err.previous.provider]?.label ?? 'provider'}): ${err.previous.message}`);
-  return { message: friendly || message, detail: details.join('\n') };
-}
-
-/* ---------- 3. Model catalogs ---------- */
-
-const catalog = { gemini: new Map(), openrouter: new Map() };
-
-export function setCatalog(provider, models) {
-  catalog[provider] = new Map(models.map((m) => [m.id, m]));
-}
-export const getCatalog = (provider) => [...catalog[provider].values()];
-export const getModelInfo = (provider, id) => catalog[provider].get(id) ?? null;
+/* ---------- Model values: "provider:id" ---------- */
 
 export const modelValue = (provider, id) => `${provider}:${id}`;
 
-/** 'openrouter:deepseek/deepseek-r1:free' -> { provider: 'openrouter', id: 'deepseek/deepseek-r1:free' }. Unprefixed values are old Gemini choices. */
+/** OpenRouter ids contain ":" and "/", so only the first colon is the separator. */
 export function parseModelValue(value = '') {
-  for (const provider of Object.keys(PROVIDERS)) {
-    if (value.startsWith(`${provider}:`)) return { provider, id: value.slice(provider.length + 1) };
-  }
-  return { provider: 'gemini', id: value };
+  const match = /^(gemini|openrouter):([\s\S]+)$/.exec(value);
+  if (match) return { provider: match[1], id: match[2] };
+  return { provider: 'gemini', id: value }; // un-prefixed ids saved by older versions were always Gemini
 }
 
-/** Google AI Studio: every model that can generate text. */
-export async function fetchGeminiModels(key, { signal, fetchImpl = defaultFetch } = {}) {
-  const found = [];
-  let pageToken = '';
-  do {
-    const url = `${GEMINI_BASE}/models?pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
-    const response = await fetchImpl(url, { headers: { 'x-goog-api-key': key }, signal });
-    if (!response.ok) throw await httpError(response, 'gemini');
-    const data = await response.json();
-    found.push(...(data.models ?? []));
-    pageToken = data.nextPageToken || '';
-  } while (pageToken);
+/* ---------- In-memory catalogs ---------- */
 
-  return found
-    .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
-    .map((m) => ({ id: String(m.name).replace(/^models\//, ''), label: m.displayName || m.name, contextLength: m.inputTokenLimit ?? null }))
-    .filter((m) => /^(gemini|gemma)/.test(m.id) && !/tts|image|embed|live|audio|aqa|robotics/i.test(m.id))
-    .map((m) => ({ provider: 'gemini', free: false, inputModalities: ['text', 'image', 'audio', 'video', 'file'], ...m }));
-}
+const catalogs = { gemini: [], openrouter: [] };
+export const setCatalog = (provider, models) => { catalogs[provider] = Array.isArray(models) ? models : []; };
+export const getCatalog = (provider) => catalogs[provider] ?? [];
 
-/** OpenRouter: the public model list, text-output models only, with ":free" ones flagged. */
-export async function fetchOpenRouterModels({ signal, fetchImpl = defaultFetch } = {}) {
-  const response = await fetchImpl(`${OPENROUTER_BASE}/models`, { signal });
-  if (!response.ok) throw await httpError(response, 'openrouter');
-  const { data = [] } = await response.json();
+/* ---------- Errors ---------- */
 
-  return data
-    .filter((m) => m?.id && !m.id.endsWith(':batch'))
-    .filter((m) => {
-      const out = m.architecture?.output_modalities ?? ['text'];
-      return out.length === 1 && out[0] === 'text'; // image-generating models answer with pictures this UI can't show
-    })
-    .map((m) => ({
-      provider: 'openrouter',
-      id: m.id,
-      label: m.name || m.id,
-      free: m.id.endsWith(':free'),
-      contextLength: m.context_length ?? null,
-      inputModalities: m.architecture?.input_modalities ?? ['text'],
-      created: m.created ?? 0,
-    }));
-}
-
-/** false only when OpenRouter clearly rejects the key (401). Any other outcome (404, offline, CORS) means "can't tell". */
-export async function verifyOpenRouterKey(key, { signal, fetchImpl = defaultFetch } = {}) {
+async function httpError(res) {
+  let message = `${res.status} ${res.statusText}`.trim();
   try {
-    const response = await fetchImpl(`${OPENROUTER_BASE}/key`, { headers: { Authorization: `Bearer ${key}` }, signal });
-    return response.status !== 401;
-  } catch {
-    return true;
-  }
+    const text = await res.text();
+    try {
+      const body = JSON.parse(text);
+      message = body?.error?.message || body?.message || message;
+    } catch {
+      if (text) message = text.slice(0, 300);
+    }
+  } catch { /* body unreadable: keep the status line */ }
+  return Object.assign(new Error(message), { status: res.status });
 }
 
-/** Curated models first (when they exist), then everything else the key can use. */
+const isAbort = (err) => err?.name === 'AbortError';
+
+/** Another model might succeed (overload, quota, missing model). Bad keys, bad payloads and network drops won't. */
+function shouldFallback(err) {
+  if (err?.fatal || err instanceof TypeError) return false;
+  const status = Number(err?.status) || null;
+  if ([401, 403, 413].includes(status)) return false;
+  if (status === 400) return /model/i.test(err.message) && /not found|not supported|unsupported|invalid/i.test(err.message);
+  return true;
+}
+
+/* ---------- Model catalogs ---------- */
+
+export async function fetchGeminiModels(apiKey, signal) {
+  const models = [];
+  let pageToken = '';
+  for (let page = 0; page < 5; page++) {
+    const url = `${GEMINI_BASE}/models?pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+    const res = await fetch(url, { headers: { 'x-goog-api-key': apiKey }, signal });
+    if (!res.ok) throw await httpError(res);
+    const data = await res.json();
+    for (const m of data.models ?? []) {
+      if (!m.supportedGenerationMethods?.includes('generateContent')) continue;
+      const id = String(m.name ?? '').replace(/^models\//, '');
+      if (id) models.push({ id, label: (m.displayName || id).replace(/^Gemini\s+/i, ''), limit: m.inputTokenLimit ?? 0 });
+    }
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return models;
+}
+
+// Not chat models, or models that reject system prompts / plain text chat
+const GEMINI_SKIP = /(embedding|aqa|imagen|veo|tts|image|live|audio|robotics|computer-use|learnlm|gemma|vision|omni|lyria|deep-research)/i;
+
+/** Newest version first; within a version: Flash, Flash-Lite, Pro; stable before preview. */
 export function orderGeminiModels(models) {
-  const rank = (m) => { const i = GEMINI_CHAIN.indexOf(m.id); return i === -1 ? GEMINI_CHAIN.length : i; };
-  return [...models].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
-}
-
-/** Free models first (newest first, as OpenRouter lists them), then the rest alphabetically. */
-export function orderOpenRouterModels(models) {
-  const free = models.filter((m) => m.free).sort((a, b) => (b.created ?? 0) - (a.created ?? 0));
-  const paid = models.filter((m) => !m.free).sort((a, b) => a.label.localeCompare(b.label));
-  return [...free, ...paid];
-}
-
-function liveGeminiChain() {
-  const live = catalog.gemini;
-  return live.size ? GEMINI_CHAIN.filter((id) => live.has(id)) : GEMINI_CHAIN;
-}
-
-function liveFreeFallbacks() {
-  const live = catalog.openrouter;
-  if (!live.size) return OPENROUTER_FREE_FALLBACKS;
-  const valid = OPENROUTER_FREE_FALLBACKS.filter((id) => live.has(id));
-  if (valid.length) return valid;
-  return orderOpenRouterModels([...live.values()]).filter((m) => m.free).slice(0, 3).map((m) => m.id);
-}
-
-/* ---------- 4. Context window ---------- */
-
-const textSize = (m) => (m.content?.length ?? 0) + (m.files ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0);
-
-/** The last N messages (and no more than the text budget), always starting on a user message. */
-export function trimContext(messages, { maxMessages = MAX_CONTEXT_MESSAGES, maxChars = MAX_CONTEXT_CHARS } = {}) {
-  let window = messages.slice(-maxMessages);
-  let total = window.reduce((n, m) => n + textSize(m), 0);
-  while (window.length > 1 && total > maxChars) {
-    total -= textSize(window[0]);
-    window = window.slice(1);
-  }
-  while (window.length > 1 && window[0].role !== 'user') window = window.slice(1);
-  return window;
-}
-
-/* ---------- 5. Adapters ---------- */
-
-/** Server-sent events: yields the data payload of each event. Handles chunks that split anywhere. */
-async function* sseData(body) {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  const payload = (raw) => {
-    const lines = raw.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).replace(/^ /, ''));
-    return lines.length ? lines.join('\n') : null; // comment lines (": keep-alive") carry no data
+  const rank = (id) => {
+    const v = /^gemini-(\d+(?:\.\d+)?)/.exec(id);
+    return {
+      version: v ? parseFloat(v[1]) : 0, // "-latest" aliases (no version) sink to the bottom
+      preview: /preview|exp/.test(id) ? 1 : 0,
+      tier: /flash-lite/.test(id) ? 1 : /flash/.test(id) ? 0 : /pro/.test(id) ? 2 : 3,
+    };
   };
-  let buffer = '';
+  return models
+    .filter((m) => /^gemini-/.test(m.id) && !GEMINI_SKIP.test(m.id))
+    .map((m) => ({ m, r: rank(m.id) }))
+    .sort((a, b) =>
+      b.r.version - a.r.version || a.r.preview - b.r.preview || a.r.tier - b.r.tier || a.m.id.localeCompare(b.m.id))
+    .map((x) => x.m);
+}
+
+/** The public model list needs no key. */
+export async function fetchOpenRouterModels(signal) {
+  const res = await fetch(`${OPENROUTER_BASE}/models`, { signal });
+  if (!res.ok) throw await httpError(res);
+  const data = await res.json();
+  return (data.data ?? []).map((m) => ({
+    id: m.id,
+    label: m.name || m.id,
+    free: (Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0) || /:free$/.test(m.id),
+    ctx: m.context_length ?? 0,
+    input: m.architecture?.input_modalities ?? ['text'],
+    output: m.architecture?.output_modalities ?? ['text'],
+  }));
+}
+
+/** Text-output models only; free ones first, then A to Z. */
+export function orderOpenRouterModels(models) {
+  return models
+    .filter((m) => m.output.includes('text'))
+    .sort((a, b) => Number(b.free) - Number(a.free) || a.label.localeCompare(b.label));
+}
+
+/* ---------- Server-sent events ---------- */
+
+/** Yields the `data:` payload of every event in a streaming response. */
+async function* sseData(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const SEP = /\r?\n\r?\n/;
+  const payload = (raw) => raw.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trimStart()).join('\n');
+  let buf = '';
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { value, done } = await reader.read();
       if (done) break;
-      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
-      let cut;
-      while ((cut = buffer.indexOf('\n\n')) !== -1) {
-        const data = payload(buffer.slice(0, cut));
-        buffer = buffer.slice(cut + 2);
-        if (data !== null) yield data;
+      buf += decoder.decode(value, { stream: true });
+      let m;
+      while ((m = SEP.exec(buf))) {
+        const raw = buf.slice(0, m.index);
+        buf = buf.slice(m.index + m[0].length);
+        const data = payload(raw);
+        if (data) yield data;
       }
     }
-    const tail = payload((buffer + decoder.decode()).replace(/\r\n/g, '\n'));
-    if (tail !== null) yield tail;
+    buf += decoder.decode();
+    const tail = payload(buf);
+    if (tail) yield tail;
   } finally {
     try { await reader.cancel(); } catch { /* already closed */ }
   }
 }
 
+/* ---------- Gemini ---------- */
+
 const fileAsText = (f) => `File: ${f.name}\n\`\`\`\n${f.text}\n\`\`\``;
 
-/* --- Google AI Studio --- */
-
-export function toGeminiContents(messages) {
-  return messages.map((m) => {
+function toGeminiContents(messages) {
+  const contents = [];
+  for (const m of messages) {
+    const role = m.role === 'user' ? 'user' : 'model';
     const parts = [];
-    for (const f of m.files ?? []) {
-      if (f.data) parts.push({ inlineData: { data: f.data, mimeType: f.mime } });
-      else if (f.text != null) parts.push({ text: fileAsText(f) });
+    if (role === 'user') {
+      for (const f of m.files ?? []) {
+        if (f.data) parts.push({ inlineData: { mimeType: f.mime || 'application/octet-stream', data: f.data } });
+        else if (f.text != null) parts.push({ text: fileAsText(f) });
+      }
     }
     if (m.content) parts.push({ text: m.content });
-    return { role: m.role === 'assistant' ? 'model' : 'user', parts };
-  });
+    if (!parts.length) continue;
+    const last = contents[contents.length - 1];
+    if (last && last.role === role) last.parts.push(...parts); // the API wants alternating turns
+    else contents.push({ role, parts });
+  }
+  return contents;
 }
 
-async function* streamGemini({ model, messages, system, key, signal, includeThoughts, fetchImpl }) {
-  const body = { contents: toGeminiContents(messages), generationConfig: {} };
-  if (system) body.systemInstruction = { parts: [{ text: system }] };
-  if (includeThoughts) body.generationConfig.thinkingConfig = { includeThoughts: true };
+async function* streamGemini({ model, apiKey, messages, system, signal }) {
+  let includeThoughts = true;
+  let res;
+  for (;;) { // at most two passes: with the thinking config, then without it
+    const body = { contents: toGeminiContents(messages) };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
+    if (includeThoughts) body.generationConfig = { thinkingConfig: { includeThoughts: true } };
 
-  const response = await fetchImpl(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!response.ok) throw await httpError(response, 'gemini', model);
+    res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (res.ok) break;
+    const err = await httpError(res);
+    if (includeThoughts && err.status === 400 && /think/i.test(err.message)) { includeThoughts = false; continue; }
+    throw err;
+  }
 
-  for await (const data of sseData(response.body)) {
-    let chunk;
-    try { chunk = JSON.parse(data); } catch { continue; }
-    if (chunk.error) throw new ProviderError(chunk.error.message, { status: chunk.error.code, provider: 'gemini', model });
+  let finishReason = '';
+  let blockReason = '';
+  let gotText = false;
+  let gotThought = false;
 
-    if (chunk.promptFeedback?.blockReason) yield { blockReason: chunk.promptFeedback.blockReason };
-    const candidate = chunk.candidates?.[0];
-    if (candidate?.finishReason) yield { finishReason: candidate.finishReason };
+  for await (const data of sseData(res)) {
+    let json;
+    try { json = JSON.parse(data); } catch { continue; }
+    if (json.error) {
+      throw Object.assign(new Error(json.error.message || 'The stream failed.'), { status: Number(json.error.code) || 500 });
+    }
+    blockReason = json.promptFeedback?.blockReason || blockReason;
+    const candidate = json.candidates?.[0];
+    finishReason = candidate?.finishReason || finishReason;
     for (const part of candidate?.content?.parts ?? []) {
       if (!part.text) continue;
-      yield part.thought ? { thought: part.text } : { text: part.text };
+      if (part.thought) { gotThought = true; yield { type: 'thought', delta: part.text }; }
+      else { gotText = true; yield { type: 'text', delta: part.text }; }
     }
   }
+
+  if (!gotText && !gotThought) {
+    const reason = blockReason || finishReason;
+    throw Object.assign(
+      new Error(reason ? `The model returned no text (${reason}).` : 'The model returned an empty response.'),
+      { fatal: true }, // every model would answer the same way
+    );
+  }
+  if (!gotText) yield { type: 'notice', message: `The model finished without an answer${finishReason ? ` (${finishReason})` : ''}.` };
+  yield { type: 'done', finishReason };
 }
 
-/* --- OpenRouter (OpenAI-compatible) --- */
+/* ---------- OpenRouter ---------- */
 
-/**
- * Converts the stored conversation to OpenAI-style messages.
- * Attachments the chosen model can't read are left out and reported in `dropped`, with a note in the text
- * so the model knows something was omitted.
- */
-export function toOpenAIMessages(messages, system, modalities = ['text']) {
+const AUDIO_FORMATS = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3' };
+
+function toOpenRouterMessages(messages, system) {
   const out = [];
-  const dropped = [];
+  const skipped = [];
   if (system) out.push({ role: 'system', content: system });
 
   for (const m of messages) {
-    if (m.role === 'assistant') { out.push({ role: 'assistant', content: m.content ?? '' }); continue; }
-
-    const parts = [];
-    const notes = [];
+    if (m.role !== 'user') {
+      if (m.content) out.push({ role: 'assistant', content: m.content });
+      continue;
+    }
+    const content = [];
     for (const f of m.files ?? []) {
-      if (f.text != null) {
-        parts.push({ type: 'text', text: fileAsText(f) });
-      } else if (f.kind === 'image' && modalities.includes('image')) {
-        parts.push({ type: 'image_url', image_url: { url: `data:${f.mime};base64,${f.data}` } });
-      } else if (f.mime === 'application/pdf') {
-        parts.push({ type: 'file', file: { filename: f.name, file_data: `data:application/pdf;base64,${f.data}` } });
-      } else {
-        dropped.push(f.name);
-        notes.push(`[Attachment "${f.name}" (${f.kind || 'file'}) was not sent: this model can't read it.]`);
-      }
+      const mime = f.mime || '';
+      if (f.text != null) content.push({ type: 'text', text: fileAsText(f) });
+      else if (f.data && mime.startsWith('image/')) content.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${f.data}` } });
+      else if (f.data && mime === 'application/pdf') content.push({ type: 'file', file: { filename: f.name, file_data: `data:${mime};base64,${f.data}` } });
+      else if (f.data && AUDIO_FORMATS[mime]) content.push({ type: 'input_audio', input_audio: { data: f.data, format: AUDIO_FORMATS[mime] } });
+      else skipped.push(f.name);
     }
-
-    const text = [m.content, ...notes].filter(Boolean).join('\n');
-    if (parts.length) {
-      if (text) parts.push({ type: 'text', text });
-      out.push({ role: 'user', content: parts });
-    } else {
-      out.push({ role: 'user', content: text });
-    }
+    if (m.content) content.push({ type: 'text', text: m.content });
+    if (!content.length) continue;
+    out.push({ role: 'user', content: content.length === 1 && content[0].type === 'text' ? content[0].text : content });
   }
-  return { messages: out, dropped };
+  return { messages: out, skipped: [...new Set(skipped)] };
 }
 
-async function* streamOpenRouter({ model, messages, system, key, signal, fetchImpl }) {
-  const info = getModelInfo('openrouter', model);
-  const { messages: payload, dropped } = toOpenAIMessages(messages, system, info?.inputModalities ?? ['text']);
-  if (dropped.length) yield { notice: `${model} can't read: ${[...new Set(dropped)].join(', ')}. Sent without them.` };
+async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
+  const { messages: body, skipped } = toOpenRouterMessages(messages, system);
+  if (skipped.length) yield { type: 'notice', message: `OpenRouter skipped files it can't read: ${skipped.join(', ')}` };
 
-  const response = await fetchImpl(`${OPENROUTER_BASE}/chat/completions`, {
+  const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model, messages: payload, stream: true }),
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'HTTP-Referer': globalThis.location?.origin || 'https://localhost',
+      'X-Title': 'Gemini Mobile Studio',
+    },
+    body: JSON.stringify({ model, messages: body, stream: true }),
     signal,
   });
-  if (!response.ok) throw await httpError(response, 'openrouter', model);
+  if (!res.ok) throw await httpError(res);
 
-  for await (const data of sseData(response.body)) {
-    if (data === '[DONE]') return;
-    let chunk;
-    try { chunk = JSON.parse(data); } catch { continue; }
-    if (chunk.error) throw new ProviderError(chunk.error.message || 'Provider error', { status: chunk.error.code, provider: 'openrouter', model });
+  let finishReason = '';
+  let gotText = false;
+  let gotThought = false;
 
-    const choice = chunk.choices?.[0];
+  for await (const data of sseData(res)) {
+    if (data === '[DONE]') break;
+    let json;
+    try { json = JSON.parse(data); } catch { continue; } // keep-alive comments and partial lines
+    if (json.error) {
+      throw Object.assign(new Error(json.error.message || 'The stream failed.'), { status: Number(json.error.code) || 500 });
+    }
+    const choice = json.choices?.[0];
     const delta = choice?.delta ?? {};
-    const reasoning = delta.reasoning ?? delta.reasoning_content;
-    if (reasoning) yield { thought: reasoning };
-    if (delta.content) yield { text: delta.content };
-    if (choice?.finish_reason) yield { finishReason: choice.finish_reason };
+
+    const reasoning = delta.reasoning ?? delta.reasoning_content
+      ?? (Array.isArray(delta.reasoning_details) ? delta.reasoning_details.map((d) => d.text || d.summary || '').join('') : '');
+    if (reasoning) { gotThought = true; yield { type: 'thought', delta: reasoning }; }
+    if (typeof delta.content === 'string' && delta.content) { gotText = true; yield { type: 'text', delta: delta.content }; }
+
+    finishReason = choice?.finish_reason || finishReason;
   }
+
+  if (!gotText && !gotThought) {
+    throw Object.assign(
+      new Error(finishReason ? `The model returned no text (${finishReason}).` : 'The model returned an empty response.'),
+      { fatal: true },
+    );
+  }
+  if (!gotText) yield { type: 'notice', message: `The model finished without an answer${finishReason ? ` (${finishReason})` : ''}.` };
+  yield { type: 'done', finishReason };
 }
 
-const ADAPTERS = { gemini: streamGemini, openrouter: streamOpenRouter };
+const RUNNERS = { gemini: streamGemini, openrouter: streamOpenRouter };
 
-/* ---------- 6. Fallback router ---------- */
+/* ---------- The engine ---------- */
 
-/** Ordered list of models to try: the one you picked, then same-provider backups, then the other provider. */
-export function buildQueue(selected, keys) {
-  const gemini = liveGeminiChain().map((id) => ({ provider: 'gemini', id }));
-  const free = liveFreeFallbacks().map((id) => ({ provider: 'openrouter', id }));
-  const ordered = selected.provider === 'gemini' ? [selected, ...gemini, ...free] : [selected, ...free, ...gemini];
-
+/** The chosen model first, then a few alternatives, only from providers that have a key. */
+function buildAttempts(selected, keys) {
+  const attempts = [];
   const seen = new Set();
-  return ordered.filter((c) => {
-    const id = `${c.provider}:${c.id}`;
-    if (!keys[c.provider] || seen.has(id)) return false;
-    seen.add(id);
+  const add = (provider, id) => {
+    const tag = `${provider}:${id}`;
+    if (!id || seen.has(tag) || !keys[provider]) return false;
+    seen.add(tag);
+    attempts.push({ provider, model: id });
     return true;
-  });
+  };
+  const idsOf = (provider) => {
+    const list = getCatalog(provider);
+    return (list.length ? list : provider === 'gemini' ? GEMINI_DEFAULTS : []).map((m) => m.id);
+  };
+
+  add(selected.provider, selected.id);
+  let extra = 0;
+  for (const id of idsOf(selected.provider)) {
+    if (extra >= SAME_PROVIDER_FALLBACKS) break;
+    if (add(selected.provider, id)) extra++;
+  }
+  const other = PROVIDERS.find((p) => p !== selected.provider);
+  extra = 0;
+  for (const id of idsOf(other)) {
+    if (extra >= OTHER_PROVIDER_FALLBACKS) break;
+    if (add(other, id)) extra++;
+  }
+  return attempts;
 }
 
-/** One model, with a single retry that drops the thinking option if the model rejects it. */
-async function* attempt(candidate, context) {
-  let includeThoughts = candidate.provider === 'gemini';
-  let produced = false;
-  for (;;) {
-    try {
-      for await (const event of ADAPTERS[candidate.provider]({ ...context, model: candidate.id, key: context.keys[candidate.provider], includeThoughts })) {
-        if (event.text || event.thought) produced = true;
-        yield event;
-      }
-      return;
-    } catch (err) {
-      const error = toProviderError(err, candidate);
-      if (includeThoughts && !produced && rejectsThinking(error)) { includeThoughts = false; continue; }
-      throw error;
-    }
-  }
-}
-
-/**
- * Streams one reply, failing over between models and providers as needed. Yields:
- *   { type: 'status', provider, model }                      an attempt is starting
- *   { type: 'text' | 'thought', delta }                      streamed content
- *   { type: 'notice', message }                              e.g. attachments a model can't read
- *   { type: 'fallback', from, to, reason }                   switching models (the stream carries on)
- *   { type: 'done', provider, model, chosenUnavailable }     finished
- * Throws a ProviderError if every option fails (error.partial = an answer was already partly shown).
- */
-export async function* streamChat({ messages, system, selected, keys, signal, fetchImpl = defaultFetch }) {
-  const context = { messages: trimContext(messages), system, signal, fetchImpl, keys };
-  let queue = buildQueue(selected, keys);
-  if (!queue.length) {
-    throw new ProviderError('No API key is set for this model.', { status: 401, provider: selected.provider, fatal: true });
+export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, selected, keys, signal }) {
+  if (!selected?.id) throw Object.assign(new Error('No model is selected.'), { fatal: true });
+  if (!keys?.[selected.provider]) {
+    throw Object.assign(
+      new Error(`Add your ${PROVIDER_NAMES[selected.provider]} API key first.`),
+      { status: 401, fatal: true },
+    );
   }
 
-  const deadProviders = new Set(); // providers that can't be reached at all right now
-  let emitted = false;
-  let firstError = null;
+  const attempts = buildAttempts(selected, keys);
   let lastError = null;
-  let chosenUnavailable = false;
 
-  for (let i = 0; i < queue.length; i++) {
-    const candidate = queue[i];
-    if (deadProviders.has(candidate.provider)) continue;
-    if (signal?.aborted) return;
+  for (let i = 0; i < attempts.length; i++) {
+    const target = attempts[i];
+    yield { type: 'status', provider: target.provider, model: target.model };
 
-    yield { type: 'status', provider: candidate.provider, model: candidate.id };
-
+    let produced = false;
     try {
-      let textLength = 0;
-      let finishReason = '';
-      let blockReason = '';
-      for await (const event of attempt(candidate, context)) {
-        if (event.text) { emitted = true; textLength += event.text.length; yield { type: 'text', delta: event.text }; }
-        else if (event.thought) { emitted = true; yield { type: 'thought', delta: event.thought }; }
-        else if (event.notice) yield { type: 'notice', message: event.notice };
-        else { finishReason = event.finishReason || finishReason; blockReason = event.blockReason || blockReason; }
+      const run = RUNNERS[target.provider]({
+        model: target.model, apiKey: keys[target.provider], messages, system, signal,
+      });
+      for await (const chunk of run) {
+        if (chunk.type === 'text' || chunk.type === 'thought') produced = true;
+        yield chunk;
       }
-      if (signal?.aborted) return;
-
-      if (!textLength) {
-        const reason = blockReason || finishReason;
-        throw new ProviderError(reason ? `The model returned no text (${reason}).` : 'The model returned an empty response.', {
-          provider: candidate.provider,
-          model: candidate.id,
-          fatal: candidate.provider === 'gemini', // blocked/filtered: another Gemini model would answer the same way
-        });
-      }
-      yield { type: 'done', provider: candidate.provider, model: candidate.id, finishReason, chosenUnavailable };
       return;
     } catch (err) {
-      if (signal?.aborted) return;
-      const error = toProviderError(err, candidate);
-      lastError = error;
-      firstError ??= error;
-      if (i > 0 && firstError !== error) error.previous = firstError;
-
-      if (emitted) { error.partial = true; throw error; } // part of an answer is on screen: don't restart it elsewhere
-      if (i === 0 && isModelUnavailable(error)) chosenUnavailable = true;
-      if (!shouldFallback(error)) throw error;
-      if (error.network) deadProviders.add(candidate.provider);
-
-      // Rate-limited on Gemini: go straight to the OpenRouter free models (when a key is set) instead of other Gemini models.
-      if (error.status === 429 && candidate.provider === 'gemini' && keys.openrouter) {
-        queue = queue.filter((c, j) => j <= i || c.provider !== 'gemini');
-      }
-
-      const next = queue.slice(i + 1).find((c) => !deadProviders.has(c.provider));
-      if (next) {
-        yield {
-          type: 'fallback',
-          from: { provider: candidate.provider, model: candidate.id },
-          to: { provider: next.provider, model: next.id },
-          reason: error.status === 429 ? 'rate limit' : error.status ? `error ${error.status}` : 'error',
-        };
-      }
+      if (signal?.aborted || isAbort(err)) return;
+      lastError = err;
+      if (produced) throw err; // part of an answer is already on screen: don't restart elsewhere
+      const next = attempts[i + 1];
+      if (!next || !shouldFallback(err)) throw err;
+      yield { type: 'fallback', from: target, to: next, reason: String(err?.message ?? err).slice(0, 80) };
     }
   }
-  throw lastError ?? new ProviderError('No model is available.', { provider: selected.provider });
+  throw lastError ?? new Error('No model is available.');
 }

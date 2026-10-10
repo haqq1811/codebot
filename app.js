@@ -5,19 +5,15 @@
    ========================================================================== */
 
 /* ---------- 1. Config ---------- */
-// At the top of app.js
-import { keyStore, loadCatalogCache, saveCatalogCache, dbGet, dbPut } from './storage.js';
-import { 
-  streamChat, 
-  fetchOpenRouterModels, 
-  fetchGeminiModels, 
-  setCatalog, 
-  orderOpenRouterModels, 
-  orderGeminiModels,
-  parseModelValue 
+import { keyStore, loadCatalogCache, saveCatalogCache } from './storage.js';
+import {
+  streamChat, fetchOpenRouterModels, fetchGeminiModels, setCatalog, getCatalog,
+  orderOpenRouterModels, orderGeminiModels, parseModelValue, modelValue,
+  GEMINI_DEFAULTS, DEFAULT_SYSTEM_PROMPT, PROVIDER_NAMES,
 } from './engine.js';
 
-const STORAGE = { apiKey: 'GEMINI_API_KEY', model: 'GEMINI_MODEL', sidebar: 'GEMINI_SIDEBAR_OPEN' };
+// API keys live in storage.js; this is only the UI state we remember.
+const STORAGE = { model: 'GEMINI_MODEL', sidebar: 'GEMINI_SIDEBAR_OPEN' };
 const DB_NAME = 'ChatHistoryDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'sessions';
@@ -82,8 +78,7 @@ const els = {
 };
 
 const state = {
-  ai: null,                  // GoogleGenAI client
-  history: [],               // `contents` sent to the API
+  history: [],               // messages sent to engine.js: { role, content, files? }
   ui: [],                    // what the transcript shows (saved next to `history`)
   attachments: [],           // files waiting to be sent
   pendingReads: new Set(),   // in-flight file reads
@@ -93,7 +88,6 @@ const state = {
 };
 
 let nextAttachmentId = 0;
-let genaiModule = null;
 let stickToBottom = true;
 let toastTimer = 0;
 let lastFocus = null;
@@ -183,96 +177,98 @@ function makeThrottle(fn, wait) {
 const modelIds = () => [...els.modelSelect.options].map((o) => o.value);
 /* ---------- 3.5 Catalog & Model Dropdown ---------- */
 
+/** Fetches the live model list of every provider that has a key. Resolves to { gemini?: Error, openrouter?: Error }. */
 async function refreshCatalogs() {
   const keys = keyStore.all();
+  const errors = {};
+  const jobs = [];
 
-  // 1. Fetch OpenRouter models if key is present
   if (keys.openrouter) {
-    try {
-      const models = await fetchOpenRouterModels();
-      const ordered = orderOpenRouterModels(models);
-      setCatalog('openrouter', ordered);
-      saveCatalogCache('openrouter', ordered);
-    } catch (err) {
-      console.warn('Could not refresh OpenRouter catalog:', err);
-    }
+    jobs.push((async () => {
+      try {
+        const ordered = orderOpenRouterModels(await fetchOpenRouterModels());
+        setCatalog('openrouter', ordered);
+        saveCatalogCache('openrouter', ordered);
+      } catch (err) {
+        errors.openrouter = err;
+        console.warn('Could not refresh OpenRouter catalog:', err);
+      }
+    })());
   }
 
-  // 2. Fetch Gemini models if key is present
   if (keys.gemini) {
-    try {
-      const models = await fetchGeminiModels(keys.gemini);
-      const ordered = orderGeminiModels(models);
-      setCatalog('gemini', ordered);
-      saveCatalogCache('gemini', ordered);
-    } catch (err) {
-      console.warn('Could not refresh Gemini catalog:', err);
-    }
+    jobs.push((async () => {
+      try {
+        const ordered = orderGeminiModels(await fetchGeminiModels(keys.gemini));
+        setCatalog('gemini', ordered);
+        saveCatalogCache('gemini', ordered);
+      } catch (err) {
+        errors.gemini = err;
+        console.warn('Could not refresh Gemini catalog:', err);
+      }
+    })());
   }
 
+  await Promise.all(jobs);
   renderModelDropdown();
+  return errors;
 }
 
 function renderModelDropdown() {
   const select = els.modelSelect;
-  select.replaceChildren();
-
-  // Load from catalog or cache
+  const keys = keyStore.all();
   const cached = loadCatalogCache();
-  const geminiModels = getCatalog('gemini').length ? getCatalog('gemini') : (cached.gemini?.models || GEMINI_DEFAULTS);
-  const openrouterModels = getCatalog('openrouter').length ? getCatalog('openrouter') : (cached.openrouter?.models || []);
 
-  // Gemini Group
-  if (geminiModels.length) {
+  const pick = (provider, fallback) =>
+    getCatalog(provider).length ? getCatalog(provider)
+      : cached[provider]?.models?.length ? cached[provider].models
+      : fallback;
+
+  const groups = [
+    { provider: 'gemini', label: 'Google AI Studio', models: pick('gemini', GEMINI_DEFAULTS) },
+    { provider: 'openrouter', label: 'OpenRouter', models: pick('openrouter', []) },
+  ];
+  // The provider you have a key for goes first, so the default choice is one that works
+  groups.sort((a, b) => Number(Boolean(keys[b.provider])) - Number(Boolean(keys[a.provider])));
+
+  select.replaceChildren();
+  for (const { provider, label, models } of groups) {
+    if (!models.length) continue;
     const group = el('optgroup');
-    group.label = 'Google AI Studio';
-    geminiModels.forEach((m) => {
-      const opt = el('option', '', m.label || m.id);
-      opt.value = modelValue('gemini', m.id);
+    group.label = label;
+    for (const m of models) {
+      const opt = el('option', '', m.free ? `${m.label} (Free)` : m.label || m.id);
+      opt.value = modelValue(provider, m.id);
       group.append(opt);
-    });
+    }
     select.append(group);
   }
 
-  // OpenRouter Group
-  if (openrouterModels.length) {
-    const group = el('optgroup');
-    group.label = 'OpenRouter';
-    openrouterModels.forEach((m) => {
-      const label = m.free ? `${m.label} (Free)` : m.label;
-      const opt = el('option', '', label);
-      opt.value = modelValue('openrouter', m.id);
-      group.append(opt);
-    });
-    select.append(group);
-  }
-
-  // Restore saved choice or default
+  // Restore the saved choice. Older versions saved a bare Gemini id, so try that form too.
   const saved = store.get(STORAGE.model);
-  if (saved && modelIds().includes(saved)) {
-    select.value = saved;
-  }
+  const ids = modelIds();
+  const wanted = saved && [saved, modelValue('gemini', saved)].find((v) => ids.includes(v));
+  if (wanted) select.value = wanted;
 }
 
 
 /* ---------- 4. API keys & Modal ---------- */
 
-// Extra DOM elements for OpenRouter Key (make sure you add an input with id="openrouter-key-input" in HTML or use this)
-const elsKeys = {
-  geminiInput: els.apiKeyInput,
-  openrouterInput: $('openrouter-key-input') // Add <input id="openrouter-key-input"> in your key-modal HTML
-};
+const keyInputs = { gemini: els.apiKeyInput, openrouter: $('openrouter-key-input') };
 
 function openKeyModal() {
   lastFocus = document.activeElement;
   const keys = keyStore.all();
-  
-  if (elsKeys.geminiInput) elsKeys.geminiInput.value = keys.gemini || '';
-  if (elsKeys.openrouterInput) elsKeys.openrouterInput.value = keys.openrouter || '';
-  
+  for (const [provider, input] of Object.entries(keyInputs)) {
+    if (!input) continue;
+    input.value = keys[provider] || '';
+    input.type = 'password';
+  }
   els.toggleKeyBtn.textContent = 'Show';
+  els.toggleKeyBtn.setAttribute('aria-pressed', 'false');
+  els.removeKeyBtn.hidden = !(keys.gemini || keys.openrouter);
   els.keyModal.hidden = false;
-  if (elsKeys.geminiInput) elsKeys.geminiInput.focus();
+  keyInputs.gemini?.focus();
 }
 
 function closeKeyModal() {
@@ -282,37 +278,39 @@ function closeKeyModal() {
 }
 
 async function saveKey() {
-  const geminiVal = elsKeys.geminiInput ? elsKeys.geminiInput.value.trim() : '';
-  const openrouterVal = elsKeys.openrouterInput ? elsKeys.openrouterInput.value.trim() : '';
-
-  if (geminiVal) keyStore.set('gemini', geminiVal);
-  else keyStore.remove('gemini');
-
-  if (openrouterVal) keyStore.set('openrouter', openrouterVal);
-  else keyStore.remove('openrouter');
+  for (const [provider, input] of Object.entries(keyInputs)) {
+    if (!input) continue;
+    const value = input.value.trim();
+    if (value) keyStore.set(provider, value);
+    else keyStore.remove(provider);
+  }
 
   closeKeyModal();
-  toast('Updating model catalogs...');
-  
-  // Re-initialize catalogs with the new keys
-  await refreshCatalogs();
+  toast('Updating model lists…');
+  const errors = await refreshCatalogs();
   syncEmptyState();
+
+  const rejected = Object.entries(errors).find(([, err]) => [400, 401, 403].includes(Number(err?.status)));
+  toast(rejected ? `${PROVIDER_NAMES[rejected[0]]} rejected that key. Open Key and check it.` : 'Keys saved.', 4500);
 }
 
 function removeKey() {
   keyStore.remove('gemini');
   keyStore.remove('openrouter');
+  for (const provider of ['gemini', 'openrouter']) {
+    setCatalog(provider, []);
+    saveCatalogCache(provider, []);
+  }
   closeKeyModal();
-  refreshCatalogs();
+  renderModelDropdown();
   syncEmptyState();
   toast('API keys removed.');
 }
 
 function syncEmptyState() {
   const keys = keyStore.all();
-  const hasAnyKey = Boolean(keys.gemini || keys.openrouter);
   els.emptyState.hidden = Boolean(els.chatBox.querySelector('.msg'));
-  els.emptyKeyBtn.hidden = hasAnyKey;
+  els.emptyKeyBtn.hidden = Boolean(keys.gemini || keys.openrouter);
 }
 
 
@@ -351,15 +349,15 @@ function readFile(file, mode) {
   });
 }
 
-/** The piece of the request this file turns into: text for code/text files, base64 for everything else. */
-async function buildPart(file) {
+/** Text/code files are kept as text, everything else as base64. The engine turns these into each provider's format. */
+async function readContent(file) {
   if (isTextFile(file)) {
     const text = await readFile(file, 'text');
-    return { part: { text: `File: ${file.name}\n\`\`\`\n${text}\n\`\`\`` }, bytes: text.length };
+    return { data: null, text, bytes: text.length };
   }
   const dataUrl = await readFile(file, 'dataURL');
   const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
-  return { part: { inlineData: { data, mimeType: mimeFor(file) } }, bytes: data.length };
+  return { data, text: null, bytes: data.length };
 }
 
 /* --- thumbnails: a small JPEG drawn on a canvas, so 30 photos never sit in memory at full size --- */
@@ -455,13 +453,15 @@ function addFiles(fileList) {
     for (const file of files) {
       const key = `${file.name}|${file.size}|${file.lastModified}`;
       if (state.attachments.some((a) => a.key === key)) { skipped++; continue; }
-      if (file.size > MAX_INLINE_BYTES) { toast(`${file.name} is over the ${formatBytes(MAX_INLINE_BYTES)} limit.`); continue; }
+      if (!file.size) { toast(`${file.name} is empty.`); continue; }
+      const sentSize = isTextFile(file) ? file.size : Math.ceil(file.size * 4 / 3); // base64 is a third bigger
+      if (sentSize > MAX_INLINE_BYTES) { toast(`${file.name} is over the ${formatBytes(MAX_INLINE_BYTES)} limit.`); continue; }
 
       const kind = fileKind(file);
       const att = {
         id: ++nextAttachmentId, key, kind,
-        name: file.name, size: file.size, ext: extLabel(file, kind),
-        thumb: null, part: null, bytes: 0, loading: true,
+        name: file.name, size: file.size, ext: extLabel(file, kind), mime: mimeFor(file),
+        thumb: null, data: null, text: null, bytes: 0, loading: true,
       };
       state.attachments.push(att);
       staged.push({ att, file });
@@ -470,9 +470,9 @@ function addFiles(fileList) {
 
     for (const { att, file } of staged) {
       try {
-        const [thumb, built] = await Promise.all([makeThumb(file, att.kind), buildPart(file)]);
+        const [thumb, content] = await Promise.all([makeThumb(file, att.kind), readContent(file)]);
         if (!state.attachments.includes(att)) continue; // removed while it was loading
-        Object.assign(att, { thumb, part: built.part, bytes: built.bytes, loading: false });
+        Object.assign(att, { thumb, ...content, loading: false });
       } catch (err) {
         console.warn('Could not read file:', file.name, err);
         state.attachments = state.attachments.filter((a) => a !== att);
@@ -560,12 +560,12 @@ function renderAttachments() {
   if (added) els.thumbStrip.scrollLeft = els.thumbStrip.scrollWidth; // keep the newest in view
 }
 
-function estimateBytes(contents) {
+/** Rough size of a request: message text plus every attached file (base64 length for binaries). */
+function estimateBytes(turns) {
   let total = 0;
-  for (const turn of contents) {
-    for (const part of turn.parts ?? []) {
-      total += (part.inlineData?.data?.length ?? 0) + (part.text?.length ?? 0);
-    }
+  for (const turn of turns) {
+    total += turn.content?.length ?? 0;
+    for (const f of turn.files ?? []) total += (f.data?.length ?? 0) + (f.text?.length ?? 0);
   }
   return total;
 }
@@ -627,11 +627,6 @@ function enhanceContent(root) {
     table.replaceWith(wrap);
     wrap.append(table);
   });
-}
-
-function syncEmptyState() {
-  els.emptyState.hidden = Boolean(els.chatBox.querySelector('.msg'));
-  els.emptyKeyBtn.hidden = Boolean(store.get(STORAGE.apiKey));
 }
 
 function createMessage(role) {
@@ -735,25 +730,39 @@ function renderTranscript() {
   scrollToBottom(true);
 }
 
-/** Old sessions (saved before the transcript was stored separately) are rebuilt from `history`. */
+function kindFromMime(mime = '') {
+  const type = mime.split('/')[0];
+  if (['image', 'video', 'audio'].includes(type)) return type;
+  return mime === 'application/pdf' ? 'pdf' : 'file';
+}
+
+/** Sessions saved by the old Gemini-only version stored { role: 'user'|'model', parts: [...] }. Convert them to { role, content, files }. */
+function normalizeTurn(turn) {
+  if (!turn || typeof turn !== 'object') return null;
+  if (!Array.isArray(turn.parts)) return turn; // already in the current format
+  const files = turn.parts.filter((p) => p.inlineData).map((p, i) => {
+    const mime = p.inlineData.mimeType || '';
+    return {
+      name: `Attachment ${i + 1}`, mime, kind: kindFromMime(mime),
+      ext: (mime.split('/')[1] || 'file').toUpperCase().slice(0, 5), data: p.inlineData.data,
+    };
+  });
+  const content = turn.parts.filter((p) => p.text && !p.thought).map((p) => p.text).join('\n');
+  return { role: turn.role === 'model' ? 'assistant' : turn.role, content, files };
+}
+
+/** Rebuilds the transcript from `history` for sessions that were saved without a separate `ui` list. */
 function deriveUi(history) {
   return history.map((turn) => {
-    const parts = turn.parts ?? [];
-    const text = parts.filter((p) => p.text).map((p) => p.text).join('\n');
     if (turn.role === 'user') {
-      const files = parts.filter((p) => p.inlineData).map((p, i) => {
-        const mime = p.inlineData.mimeType || '';
-        const [type, subtype = ''] = mime.split('/');
-        const kind = ['image', 'video', 'audio'].includes(type) ? type : mime === 'application/pdf' ? 'pdf' : 'file';
-        return { name: `Attachment ${i + 1}`, kind, ext: subtype.toUpperCase().slice(0, 5) || 'FILE' };
-      });
-      return { role: 'user', text, files };
+      const files = (turn.files ?? []).map(({ name, size, kind, ext, thumb }) => ({ name, size, kind, ext, thumb }));
+      return { role: 'user', text: turn.content ?? '', files };
     }
-    return { role: 'ai', text };
+    return { role: 'ai', text: turn.content ?? '', thoughts: turn.thoughts ?? '', model: turn.model ?? '' };
   });
 }
 
-/* ---------- 7. Generation ---------- */
+/* ---------- 7. Generation (engine.js does the streaming) ---------- */
 
 function setBusy(busy) {
   state.generating = busy;
@@ -764,19 +773,36 @@ function setBusy(busy) {
 
 function stopGeneration() { state.abort?.abort(); }
 
+/** True when the provider has a key. Otherwise opens the key dialog. */
+function ensureKeyFor(provider) {
+  if (keyStore.get(provider)) return true;
+  toast(`Add your ${PROVIDER_NAMES[provider]} API key to use this model.`, 4000);
+  openKeyModal();
+  return false;
+}
+
 async function sendMessage() {
   if (state.generating) return;
 
   await Promise.all(state.pendingReads); // let files that are still loading finish first
+  if (state.generating) return;          // a second tap while we waited
 
   const text = els.userInput.value.trim();
   if (!text && state.attachments.length === 0) return;
-  if (!(await requireAI())) return;
 
-  const parts = state.attachments.map((a) => a.part);
-  if (text) parts.push({ text });
+  const selected = parseModelValue(els.modelSelect.value);
+  if (!ensureKeyFor(selected.provider)) return;
 
-  if (estimateBytes([...state.history, { parts }]) > MAX_INLINE_BYTES) {
+  // Copy the attachments NOW: the composer is cleared before the request starts.
+  const files = state.attachments.map(({ name, size, kind, ext, mime, thumb, data, text: fileText }) =>
+    ({ name, size, kind, ext, mime, thumb, data, text: fileText }));
+
+  const message = {
+    role: 'user',
+    content: text,
+    files: files.map(({ thumb, ...forRequest }) => forRequest), // thumbnails are for the transcript only
+  };
+  if (estimateBytes([...state.history, message]) > MAX_INLINE_BYTES) {
     toast('This chat plus your attachments is over the 19 MB limit. Remove files or start a new chat.', 5000);
     return;
   }
@@ -784,7 +810,7 @@ async function sendMessage() {
   const ui = {
     role: 'user',
     text,
-    files: state.attachments.map(({ name, size, kind, ext, thumb }) => ({ name, size, kind, ext, thumb })),
+    files: files.map(({ name, size, kind, ext, thumb }) => ({ name, size, kind, ext, thumb })),
   };
 
   document.querySelectorAll('.retry-btn').forEach((btn) => btn.remove());
@@ -795,43 +821,27 @@ async function sendMessage() {
   autoGrow();
   clearAttachments();
 
-  await runTurn({ parts, ui });
+  await runTurn({ message, ui });
 }
 
-/** One request/response cycle. `turn` = { parts, ui }. */
-/* ---------- 7. Generation (Using engine.js streamChat) ---------- */
-
+/** One request/response cycle. `turn` = { message, ui }. */
 async function runTurn(turn) {
   state.abort = new AbortController();
   const { signal } = state.abort;
   setBusy(true);
 
-  // Convert turn parts/ui to engine message format
-  const userMessage = {
-    role: 'user',
-    content: turn.ui.text,
-    files: state.attachments.map(a => ({
-      name: a.name,
-      size: a.size,
-      kind: a.kind,
-      ext: a.ext,
-      mime: mimeFor(a),
-      thumb: a.thumb,
-      data: a.part?.inlineData?.data || null,
-      text: a.part?.text ? a.part.text.replace(/^File: .+\n```\n([\s\S]*)\n```$/, '$1') : null
-    }))
-  };
-
-  state.history.push(userMessage);
+  state.history.push(turn.message);
   state.ui.push(turn.ui);
 
+  const selected = parseModelValue(els.modelSelect.value);
+  const used = { provider: selected.provider, model: selected.id }; // updated if the engine falls back
+
   const bubble = createMessage('ai');
-  const selectedModel = parseModelValue(els.modelSelect.value);
-  setThinking(bubble, selectedModel.id);
+  setThinking(bubble, used.model);
   renderAssistant(bubble, {});
   scrollToBottom(true);
 
-  const result = { text: '', thoughts: '', model: selectedModel.id, finishReason: '' };
+  const result = { text: '', thoughts: '', model: used.model, finishReason: '' };
   const paint = makeThrottle(() => { renderAssistant(bubble, result); scrollToBottom(); }, STREAM_PAINT_MS);
 
   let failure = null;
@@ -840,13 +850,15 @@ async function runTurn(turn) {
     const stream = streamChat({
       messages: state.history,
       system: DEFAULT_SYSTEM_PROMPT,
-      selected: selectedModel,
+      selected,
       keys: keyStore.all(),
-      signal
+      signal,
     });
 
     for await (const chunk of stream) {
       if (chunk.type === 'status') {
+        used.provider = chunk.provider;
+        used.model = chunk.model;
         result.model = chunk.model;
         if (!result.text && !result.thoughts) setThinking(bubble, chunk.model);
       } else if (chunk.type === 'text') {
@@ -856,7 +868,7 @@ async function runTurn(turn) {
         result.thoughts += chunk.delta;
         paint();
       } else if (chunk.type === 'fallback') {
-        toast(`Switched from ${chunk.from.model} to ${chunk.to.model} (${chunk.reason})`, 4000);
+        toast(`Switched from ${chunk.from.model} to ${chunk.to.model} (${chunk.reason})`, 4500);
       } else if (chunk.type === 'notice') {
         toast(chunk.message, 4000);
       } else if (chunk.type === 'done') {
@@ -873,16 +885,15 @@ async function runTurn(turn) {
   setBusy(false);
 
   if (result.text.trim() || result.thoughts.trim()) {
-    const assistantMessage = {
+    state.history.push({
       role: 'assistant',
       content: result.text,
       thoughts: result.thoughts,
       model: result.model,
-      provider: selectedModel.provider
-    };
-    state.history.push(assistantMessage);
+      provider: used.provider,
+    });
     state.ui.push({ role: 'ai', text: result.text, thoughts: result.thoughts, model: result.model });
-    
+
     renderAssistant(bubble, result, { final: true, note: stopped ? 'stopped' : failure ? 'interrupted' : '' });
     if (failure && !stopped) toast(describeError(failure).message, 5000);
     scrollToBottom();
@@ -890,110 +901,30 @@ async function runTurn(turn) {
     return;
   }
 
-  // Rollback on complete failure
+  // Nothing came back: take the question out of the history so a retry doesn't send it twice
   state.history.pop();
   state.ui.pop();
   showError(bubble, turn, stopped ? null : failure ?? new Error('The model returned an empty response.'));
 }
 
+/** Turns the AI bubble into an error card with a Retry button. `err` null means "stopped by the user". */
+function showError(bubble, turn, err) {
+  const { message, detail } = err ? describeError(err) : { message: 'Stopped before a reply arrived.', detail: '' };
 
-/* --- model fallback --- */
+  bubble.className = 'msg ai error';
+  bubble.replaceChildren(el('div', 'error-text', message));
+  delete bubble._parts;
+  if (detail) bubble.append(el('div', 'error-detail', detail));
 
-async function generateWithFallback(result, { signal, onStatus, onUpdate }) {
-  const chosen = els.modelSelect.value;
-  const queue = [chosen, ...modelIds().filter((m) => m !== chosen)];
-  const unavailable = [];
-  let lastError = null;
-
-  for (const model of queue) {
-    if (signal.aborted) return;
-    onStatus(model);
-    result.model = model;
-    let includeThoughts = true;
-
-    for (;;) { // at most two passes: with the thinking config, then without it
-      try {
-        await streamFromModel(model, includeThoughts, result, signal, onUpdate);
-        if (!signal.aborted && model !== chosen && unavailable.includes(chosen)) {
-          els.modelSelect.value = model;
-          store.set(STORAGE.model, model);
-          toast(`${chosen} isn't available, so I switched to ${model}.`, 4500);
-        }
-        return;
-      } catch (err) {
-        if (signal.aborted) return;
-        lastError = err;
-        if (result.text || result.thoughts) throw err; // partial answer is on screen: don't restart elsewhere
-        if (includeThoughts && rejectsThinking(err)) { includeThoughts = false; continue; }
-        break;
-      }
-    }
-
-    if (isModelUnavailable(lastError)) unavailable.push(model);
-    if (!shouldFallback(lastError)) throw lastError;
-  }
-  throw lastError ?? new Error('No model is available.');
-}
-
-const ABORTED = Symbol('aborted');
-
-/** Resolves with ABORTED as soon as `signal` fires, even if the SDK ignores the signal itself. */
-function raceAbort(promise, signal) {
-  promise.catch(() => {}); // a late rejection after an abort is expected
-  if (signal.aborted) return Promise.resolve(ABORTED);
-  return new Promise((resolve, reject) => {
-    const onAbort = () => resolve(ABORTED);
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  const retry = el('button', 'retry-btn', 'Retry');
+  retry.type = 'button';
+  retry.addEventListener('click', () => {
+    if (state.generating) { busyGuard(); return; }
+    bubble.remove();
+    runTurn(turn);
   });
-}
-
-async function streamFromModel(model, includeThoughts, result, signal, onUpdate) {
-  const config = { abortSignal: signal };
-  if (includeThoughts) config.thinkingConfig = { includeThoughts: true };
-
-  const stream = await raceAbort(
-    state.ai.models.generateContentStream({ model, contents: state.history, config }),
-    signal,
-  );
-  if (stream === ABORTED) return;
-
-  const iterator = stream[Symbol.asyncIterator]();
-  try {
-    for (;;) {
-      const step = await raceAbort(iterator.next(), signal);
-      if (step === ABORTED || step.done) break;
-      collectChunk(step.value, result);
-      onUpdate();
-    }
-  } finally {
-    Promise.resolve(iterator.return?.()).catch(() => {});
-  }
-
-  if (!signal.aborted && !result.text.trim()) {
-    const reason = result.blockReason || result.finishReason;
-    throw Object.assign(
-      new Error(reason ? `The model returned no text (${reason}).` : 'The model returned an empty response.'),
-      { fatal: true }, // every model would answer the same way
-    );
-  }
-}
-
-function collectChunk(chunk, result) {
-  const candidate = chunk?.candidates?.[0];
-  result.finishReason = candidate?.finishReason || result.finishReason;
-  result.blockReason = chunk?.promptFeedback?.blockReason || result.blockReason;
-
-  const parts = candidate?.content?.parts;
-  if (Array.isArray(parts) && parts.length) {
-    for (const part of parts) {
-      if (!part.text) continue;
-      if (part.thought) result.thoughts += part.text;
-      else result.text += part.text;
-    }
-  } else if (typeof chunk?.text === 'string') {
-    result.text += chunk.text;
-  }
+  bubble.append(retry);
+  scrollToBottom();
 }
 
 /* --- error handling --- */
@@ -1011,30 +942,13 @@ function errInfo(err) {
   return { status: Number(status) || null, message };
 }
 
-const rejectsThinking = (err) => {
-  const { status, message } = errInfo(err);
-  return status === 400 && /think/i.test(message);
-};
-
-function isModelUnavailable(err) {
-  const { status, message } = errInfo(err);
-  return status === 404 || (status === 400 && /model/i.test(message) && /not found|not supported|unsupported|invalid/i.test(message));
-}
-
-/** Another model might succeed (overload, quota, missing model). Bad keys, bad payloads and network drops won't. */
-function shouldFallback(err) {
-  if (err?.fatal || err instanceof TypeError) return false;
-  const { status } = errInfo(err);
-  if ([401, 403, 413].includes(status)) return false;
-  if (status === 400) return isModelUnavailable(err);
-  return true;
-}
-
 function describeError(err) {
   const { status, message } = errInfo(err);
   let friendly = null;
   if (status === 401 || status === 403 || /api key|API_KEY_INVALID/i.test(message)) {
     friendly = 'Your API key was rejected. Open Key and check that it is correct and enabled.';
+  } else if (status === 402) {
+    friendly = 'This model needs OpenRouter credits. Pick a (Free) model or add credits.';
   } else if (status === 429) {
     friendly = 'Rate limit or quota reached. Wait a moment, then retry or pick another model.';
   } else if (status === 503 || /overloaded|unavailable/i.test(message)) {
@@ -1175,7 +1089,7 @@ async function loadSession(id) {
 
   clearAttachments();
   state.sessionId = session.id;
-  state.history = session.messages ?? [];
+  state.history = (session.messages ?? []).map(normalizeTurn).filter(Boolean);
   state.ui = session.ui ?? deriveUi(state.history);
   renderTranscript();
 
@@ -1286,7 +1200,6 @@ function init() {
   renderModelDropdown();
   refreshCatalogs().catch((err) => console.warn('Catalog refresh failed:', err));
   els.modelSelect.addEventListener('change', () => store.set(STORAGE.model, els.modelSelect.value));
-   
 
   // Composer
   els.sendBtn.addEventListener('click', () => (state.generating ? stopGeneration() : sendMessage()));
@@ -1324,10 +1237,12 @@ function init() {
   els.saveKeyBtn.addEventListener('click', saveKey);
   els.closeKeyBtn.addEventListener('click', closeKeyModal);
   els.removeKeyBtn.addEventListener('click', removeKey);
-  els.apiKeyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveKey(); });
+  Object.values(keyInputs).forEach((input) => {
+    input?.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveKey(); });
+  });
   els.toggleKeyBtn.addEventListener('click', () => {
     const show = els.apiKeyInput.type === 'password';
-    els.apiKeyInput.type = show ? 'text' : 'password';
+    Object.values(keyInputs).forEach((input) => { if (input) input.type = show ? 'text' : 'password'; });
     els.toggleKeyBtn.textContent = show ? 'Hide' : 'Show';
     els.toggleKeyBtn.setAttribute('aria-pressed', String(show));
   });
@@ -1357,10 +1272,6 @@ function init() {
   renderAttachments();
   syncEmptyState();
   renderHistoryList();
-
-  // Warm up the SDK if a key is already saved (no modal, no interruption)
-  const savedKey = store.get(STORAGE.apiKey);
-  if (savedKey) initAI(savedKey).catch((err) => console.warn('SDK load failed:', err));
 }
 
 init();
