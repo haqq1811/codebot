@@ -13,7 +13,7 @@
    ========================================================================== */
 
 // Bump this only to throw away every saved file. Normal deploys do not need it.
-const CACHE = 'studio-v1';
+const CACHE = 'studio-v2';
 
 // If a deploy changes this list, the page picks it up the next time it is online.
 const CORE = ['./', './index.html', './app.js', './engine.js', './storage.js', './style.css', './manifest.json'];
