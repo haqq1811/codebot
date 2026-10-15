@@ -790,6 +790,12 @@ async function sendMessage() {
   const text = els.userInput.value.trim();
   if (!text && state.attachments.length === 0) return;
 
+  // Offline: keep what was typed (we return before the composer is cleared)
+  if (!navigator.onLine) {
+    toast("You're offline. Your message is kept. Send it when you're back online.", 4500);
+    return;
+  }
+
   const selected = parseModelValue(els.modelSelect.value);
   if (!ensureKeyFor(selected.provider)) return;
 
@@ -919,7 +925,8 @@ function showError(bubble, turn, err) {
   const retry = el('button', 'retry-btn', 'Retry');
   retry.type = 'button';
   retry.addEventListener('click', () => {
-    if (state.generating) { busyGuard(); return; }
+    if (busyGuard()) return;
+    if (!navigator.onLine) { toast("You're offline. Retry when you're back online."); return; }
     bubble.remove();
     runTurn(turn);
   });
@@ -1195,10 +1202,25 @@ function wireDragAndDrop() {
   });
 }
 
+const offlineBanner = $('offline-banner');
+function syncOnline() {
+  if (offlineBanner) offlineBanner.hidden = navigator.onLine;
+}
+
 function init() {
   // Model Dropdown Setup
   renderModelDropdown();
   refreshCatalogs().catch((err) => console.warn('Catalog refresh failed:', err));
+
+  // Offline awareness: banner now, and fresh model lists as soon as the connection returns
+  syncOnline();
+  window.addEventListener('offline', syncOnline);
+  window.addEventListener('online', () => {
+    syncOnline();
+    toast('Back online.');
+    refreshCatalogs().catch((err) => console.warn('Catalog refresh failed:', err));
+  });
+
   els.modelSelect.addEventListener('change', () => store.set(STORAGE.model, els.modelSelect.value));
 
   // Composer

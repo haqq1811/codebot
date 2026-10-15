@@ -895,3 +895,14 @@ body.dragging #main::after {
 /* Key modal: one labelled field per provider */
 .key-label { margin-top: 4px; font-size: .8rem; font-weight: 600; color: var(--text-dim); }
 .key-label a { font-weight: 400; }
+
+/* ---------- Offline banner ---------- */
+.offline-banner {
+  flex: none;
+  padding: 6px 12px;
+  text-align: center;
+  font-size: .8rem;
+  color: #ffd8a8;
+  background: #3a2e12;
+  border-bottom: 1px solid #5c4a1a;
+}
