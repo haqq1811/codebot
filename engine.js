@@ -130,17 +130,25 @@ export async function fetchOpenRouterModels(signal) {
   const res = await fetch(`${OPENROUTER_BASE}/models`, { signal });
   if (!res.ok) throw await httpError(res);
   const data = await res.json();
-  return (data.data ?? []).map((m) => ({
-    id: m.id,
-    label: m.name || m.id,
-    free: (Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0) || /:free$/.test(m.id),
-    ctx: m.context_length ?? 0,
-    input: m.architecture?.input_modalities ?? ['text'],
-    output: m.architecture?.output_modalities ?? ['text'],
-  }));
+  const price = (v) => (v == null || v === '' ? NaN : Number(v));
+  return (data.data ?? []).map((m) => {
+    const prompt = price(m.pricing?.prompt);
+    const completion = price(m.pricing?.completion);
+    const priced = Number.isFinite(prompt) && Number.isFinite(completion);
+    return {
+      id: m.id,
+      // OpenRouter already writes "(free)" into some names; the dropdown adds its own tag
+      label: (m.name || m.id).replace(/\s*\(free\)\s*$/i, ''),
+      // true = free, false = paid (including variable pricing), null = pricing not listed
+      free: /:free$/.test(m.id) || (priced && prompt === 0 && completion === 0) ? true : priced ? false : null,
+      ctx: m.context_length ?? 0,
+      input: m.architecture?.input_modalities ?? ['text'],
+      output: m.architecture?.output_modalities ?? ['text'],
+    };
+  });
 }
 
-/** Text-output models only; free ones first, then A to Z. */
+/** Text-output models only; free ones first, then A to Z. (Gemini's model list says nothing about pricing, so those carry no tag.) */
 export function orderOpenRouterModels(models) {
   return models
     .filter((m) => m.output.includes('text'))

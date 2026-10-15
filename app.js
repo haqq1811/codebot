@@ -237,7 +237,8 @@ function renderModelDropdown() {
     const group = el('optgroup');
     group.label = label;
     for (const m of models) {
-      const opt = el('option', '', m.free ? `${m.label} (Free)` : m.label || m.id);
+      const tag = m.free === true ? ' (Free)' : m.free === false ? ' (Paid)' : '';
+      const opt = el('option', '', `${m.label || m.id}${tag}`);
       opt.value = modelValue(provider, m.id);
       group.append(opt);
     }
