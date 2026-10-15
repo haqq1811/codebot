@@ -9,7 +9,7 @@ import { keyStore, loadCatalogCache, saveCatalogCache } from './storage.js';
 import {
   streamChat, fetchOpenRouterModels, fetchGeminiModels, setCatalog, getCatalog,
   orderOpenRouterModels, orderGeminiModels, parseModelValue, modelValue,
-  GEMINI_DEFAULTS, DEFAULT_SYSTEM_PROMPT, PROVIDER_NAMES,
+  GEMINI_DEFAULTS, DEFAULT_SYSTEM_PROMPT, PROVIDER_NAMES, pricingTag,
 } from './engine.js';
 
 // API keys live in storage.js; this is only the UI state we remember.
@@ -237,8 +237,7 @@ function renderModelDropdown() {
     const group = el('optgroup');
     group.label = label;
     for (const m of models) {
-      const tag = m.free === true ? ' (Free)' : m.free === false ? ' (Paid)' : '';
-      const opt = el('option', '', `${m.label || m.id}${tag}`);
+      const opt = el('option', '', `${m.label || m.id}${pricingTag(provider, m)}`);
       opt.value = modelValue(provider, m.id);
       group.append(opt);
     }

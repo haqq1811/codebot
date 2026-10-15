@@ -39,6 +39,25 @@ export const GEMINI_DEFAULTS = [
   { id: 'gemini-2.5-pro', label: '2.5 Pro' },
 ];
 
+/* ---------- Pricing tags ---------- */
+
+/* Gemini's model list carries no pricing, so this table is kept by hand.
+   Source: Google's pricing page (ai.google.dev/gemini-api/docs/pricing), checked 15 Oct 2026.
+   Update it when Google changes the free tier. Models in neither list get no tag. */
+const GEMINI_FREE_TIER = new Set([
+  'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite',
+  'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-pro',
+]);
+const GEMINI_PAID_ONLY = new Set(['gemini-4-argon', 'gemini-3.1-pro-preview', 'gemini-3.1-pro-preview-customtools']);
+
+/** " (Free)", " (Free tier)", " (Paid)" or "" (price unknown) for a catalog entry. */
+export function pricingTag(provider, model) {
+  if (provider === 'openrouter') return model.free === true ? ' (Free)' : model.free === false ? ' (Paid)' : '';
+  if (GEMINI_FREE_TIER.has(model.id)) return ' (Free tier)';
+  if (GEMINI_PAID_ONLY.has(model.id)) return ' (Paid)';
+  return '';
+}
+
 /* ---------- Model values: "provider:id" ---------- */
 
 export const modelValue = (provider, id) => `${provider}:${id}`;
@@ -107,11 +126,13 @@ export async function fetchGeminiModels(apiKey, signal) {
 // Not chat models, or models that reject system prompts / plain text chat
 const GEMINI_SKIP = /(embedding|aqa|imagen|veo|tts|image|live|audio|robotics|computer-use|learnlm|gemma|vision|omni|lyria|deep-research)/i;
 
-/** Newest version first; within a version: Flash, Flash-Lite, Pro; stable before preview. */
+/** Free-tier models first, then unknown, then paid-only. Inside each group: newest version first,
+ *  then Flash, Flash-Lite, Pro; stable before preview. Fallbacks walk this list, so they try free models first. */
 export function orderGeminiModels(models) {
   const rank = (id) => {
     const v = /^gemini-(\d+(?:\.\d+)?)/.exec(id);
     return {
+      cost: GEMINI_FREE_TIER.has(id) ? 0 : GEMINI_PAID_ONLY.has(id) ? 2 : 1,
       version: v ? parseFloat(v[1]) : 0, // "-latest" aliases (no version) sink to the bottom
       preview: /preview|exp/.test(id) ? 1 : 0,
       tier: /flash-lite/.test(id) ? 1 : /flash/.test(id) ? 0 : /pro/.test(id) ? 2 : 3,
@@ -121,7 +142,7 @@ export function orderGeminiModels(models) {
     .filter((m) => /^gemini-/.test(m.id) && !GEMINI_SKIP.test(m.id))
     .map((m) => ({ m, r: rank(m.id) }))
     .sort((a, b) =>
-      b.r.version - a.r.version || a.r.preview - b.r.preview || a.r.tier - b.r.tier || a.m.id.localeCompare(b.m.id))
+      a.r.cost - b.r.cost || b.r.version - a.r.version || a.r.preview - b.r.preview || a.r.tier - b.r.tier || a.m.id.localeCompare(b.m.id))
     .map((x) => x.m);
 }
 
