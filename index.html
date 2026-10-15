@@ -14,7 +14,7 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231565c0'/%3E%3Cpath d='M16 6l2.6 7.4L26 16l-7.4 2.6L16 26l-2.6-7.4L6 16l7.4-2.6z' fill='%23fff'/%3E%3C/svg%3E">
 
-  <title>Gemini Mobile Studio</title>
+  <title>Fallback AI Studio</title>
 
   <!-- highlight.js theme first so style.css can override it without !important -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
@@ -67,7 +67,7 @@
           <button id="menu-btn" class="icon-btn" type="button" aria-label="Toggle chat history" aria-controls="sidebar" aria-expanded="false">
             <svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg>
           </button>
-          <h1 class="app-title">Gemini</h1>
+          <h1 class="app-title">AI Studio</h1>
         </div>
 
         <div class="header-controls">
@@ -150,9 +150,6 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"></div>
-  <!-- Mobile debug console. Delete these two lines when you no longer need it. -->
-  <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-  <script>if (window.eruda) eruda.init();</script>
 
   <script type="module" src="app.js"></script>
 </body>
