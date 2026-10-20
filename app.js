@@ -184,13 +184,25 @@ function makeThrottle(fn, wait) {
 const modelIds = () => [...els.modelSelect.options].map((o) => o.value);
 /* ---------- 3.5 Catalog & Model Dropdown ---------- */
 
-/** Fetches the live model list of every provider that has a key. Resolves to { gemini?: Error, openrouter?: Error }. */
-async function refreshCatalogs() {
+// OpenRouter's model list is about 0.8 MB, so a saved copy is reused for a day.
+const CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Fetches the live model list of every provider that has a key, unless a copy from the last 24 hours is saved
+ * (`force` skips that check). Resolves to { gemini?: Error, openrouter?: Error }.
+ */
+async function refreshCatalogs({ force = false } = {}) {
   const keys = keyStore.all();
+  const cached = loadCatalogCache();
   const errors = {};
   const jobs = [];
+  const isFresh = (provider) =>
+    !force && cached[provider]?.models?.length > 0 && Date.now() - (cached[provider].ts ?? 0) < CATALOG_MAX_AGE_MS;
 
-  if (keys.openrouter) {
+  if (keys.openrouter && isFresh('openrouter')) setCatalog('openrouter', cached.openrouter.models);
+  if (keys.gemini && isFresh('gemini')) setCatalog('gemini', cached.gemini.models);
+
+  if (keys.openrouter && !isFresh('openrouter')) {
     jobs.push((async () => {
       try {
         const ordered = orderOpenRouterModels(await fetchOpenRouterModels());
@@ -203,7 +215,7 @@ async function refreshCatalogs() {
     })());
   }
 
-  if (keys.gemini) {
+  if (keys.gemini && !isFresh('gemini')) {
     jobs.push((async () => {
       try {
         const ordered = orderGeminiModels(await fetchGeminiModels(keys.gemini));
@@ -294,7 +306,7 @@ async function saveKey() {
 
   closeKeyModal();
   toast('Updating model lists…');
-  const errors = await refreshCatalogs();
+  const errors = await refreshCatalogs({ force: true }); // new keys: always fetch
   syncEmptyState();
 
   const rejected = Object.entries(errors).find(([, err]) => [400, 401, 403].includes(Number(err?.status)));
@@ -702,7 +714,7 @@ function setThinking(msg, model) {
 
 function renderAssistant(msg, data, { final = false, note = '' } = {}) {
   const parts = assistantParts(msg);
-  const { text = '', thoughts = '', model = '' } = data;
+  const { text = '', thoughts = '', model = '', stats = null } = data;
   const hasText = text.length > 0;
   const hasThoughts = thoughts.trim().length > 0;
 
@@ -721,8 +733,34 @@ function renderAssistant(msg, data, { final = false, note = '' } = {}) {
   }
 
   const label = model ? (note ? `${model} (${note})` : model) : note;
-  parts.meta.hidden = !(final && label);
-  parts.meta.textContent = label;
+  const caption = [label, formatStats(stats)].filter(Boolean).join('\n');
+  parts.meta.hidden = !(final && caption);
+  parts.meta.textContent = caption;
+}
+
+function formatDuration(ms) {
+  const s = ms / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+
+const formatTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** "first output 2.1s · answer began 36s · total 41s · 1.9k in · 1.2k thinking · 3.2k out" */
+function formatStats(stats) {
+  if (!stats?.totalMs) return '';
+  const bits = [];
+  if (stats.firstMs) bits.push(`first output ${formatDuration(stats.firstMs)}`);
+  if (stats.answerMs && stats.answerMs - stats.firstMs >= 1000) bits.push(`answer began ${formatDuration(stats.answerMs)}`);
+  bits.push(`total ${formatDuration(stats.totalMs)}`);
+  const u = stats.usage;
+  if (u) {
+    bits.push(`${formatTokens(u.promptTokens)} in`);
+    if (u.thoughtTokens) bits.push(`${formatTokens(u.thoughtTokens)} thinking`);
+    bits.push(`${formatTokens(u.outputTokens)} out`);
+  }
+  return bits.join(' · ');
 }
 
 function renderTranscript() {
@@ -854,7 +892,10 @@ async function runTurn(turn) {
   renderAssistant(bubble, {});
   scrollToBottom(true);
 
-  const result = { text: '', thoughts: '', model: used.model, finishReason: '' };
+  const result = { text: '', thoughts: '', model: used.model, finishReason: '', usage: null };
+  const t0 = performance.now();
+  let firstMs = 0;   // when anything first appeared (a thought summary or the answer)
+  let answerMs = 0;  // when the answer text itself began
   const paint = makeThrottle(() => { renderAssistant(bubble, result); scrollToBottom(); }, STREAM_PAINT_MS);
 
   let failure = null;
@@ -884,11 +925,16 @@ async function runTurn(turn) {
         result.model = chunk.model;
         if (!result.text && !result.thoughts) setThinking(bubble, chunk.model);
       } else if (chunk.type === 'text') {
+        if (!firstMs) firstMs = performance.now() - t0;
+        if (!answerMs) answerMs = performance.now() - t0;
         result.text += chunk.delta;
         paint();
       } else if (chunk.type === 'thought') {
+        if (!firstMs) firstMs = performance.now() - t0;
         result.thoughts += chunk.delta;
         paint();
+      } else if (chunk.type === 'usage') {
+        result.usage = chunk;
       } else if (chunk.type === 'fallback') {
         toast(`Switched from ${chunk.from.model} to ${chunk.to.model} (${chunk.reason})`, 4500);
       } else if (chunk.type === 'notice') {
@@ -902,6 +948,7 @@ async function runTurn(turn) {
   }
 
   paint.cancel();
+  result.stats = { firstMs, answerMs, totalMs: performance.now() - t0, usage: result.usage };
   const stopped = signal.aborted;
   state.abort = null;
   setBusy(false);
@@ -914,7 +961,7 @@ async function runTurn(turn) {
       model: result.model,
       provider: used.provider,
     });
-    state.ui.push({ role: 'ai', text: result.text, thoughts: result.thoughts, model: result.model });
+    state.ui.push({ role: 'ai', text: result.text, thoughts: result.thoughts, model: result.model, stats: result.stats });
 
     renderAssistant(bubble, result, { final: true, note: stopped ? 'stopped' : failure ? 'interrupted' : '' });
     if (failure && !stopped) toast(describeError(failure).message, 5000);

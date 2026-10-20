@@ -10,6 +10,7 @@
      { type: 'thought',  delta }
      { type: 'fallback', from: {provider, model}, to: {provider, model}, reason }
      { type: 'notice',   message }
+     { type: 'usage',    promptTokens, outputTokens, thoughtTokens }  (only if the provider reports them)
      { type: 'done',     finishReason }
 
    Messages (what app.js keeps in state.history):
@@ -254,6 +255,7 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
   let blockReason = '';
   let gotText = false;
   let gotThought = false;
+  let usage = null;
 
   for await (const data of sseData(res)) {
     let json;
@@ -262,6 +264,7 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
       throw Object.assign(new Error(json.error.message || 'The stream failed.'), { status: Number(json.error.code) || 500 });
     }
     blockReason = json.promptFeedback?.blockReason || blockReason;
+    usage = json.usageMetadata ?? usage;
     const candidate = json.candidates?.[0];
     finishReason = candidate?.finishReason || finishReason;
     for (const part of candidate?.content?.parts ?? []) {
@@ -279,6 +282,14 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
     );
   }
   if (!gotText) yield { type: 'notice', message: `The model finished without an answer${finishReason ? ` (${finishReason})` : ''}.` };
+  if (usage) {
+    yield {
+      type: 'usage',
+      promptTokens: usage.promptTokenCount ?? 0,
+      outputTokens: usage.candidatesTokenCount ?? 0,
+      thoughtTokens: usage.thoughtsTokenCount ?? 0,
+    };
+  }
   yield { type: 'done', finishReason };
 }
 
@@ -332,6 +343,7 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
   let finishReason = '';
   let gotText = false;
   let gotThought = false;
+  let usage = null;
 
   for await (const data of sseData(res)) {
     if (data === '[DONE]') break;
@@ -340,6 +352,7 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
     if (json.error) {
       throw Object.assign(new Error(json.error.message || 'The stream failed.'), { status: Number(json.error.code) || 500 });
     }
+    if (json.usage) usage = json.usage; // arrives in the last chunk, often with no choices
     const choice = json.choices?.[0];
     const delta = choice?.delta ?? {};
 
@@ -358,6 +371,15 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
     );
   }
   if (!gotText) yield { type: 'notice', message: `The model finished without an answer${finishReason ? ` (${finishReason})` : ''}.` };
+  if (usage) {
+    const thinking = usage.completion_tokens_details?.reasoning_tokens ?? 0;
+    yield {
+      type: 'usage',
+      promptTokens: usage.prompt_tokens ?? 0,
+      outputTokens: Math.max((usage.completion_tokens ?? 0) - thinking, 0), // OpenAI-style counts include reasoning
+      thoughtTokens: thinking,
+    };
+  }
   yield { type: 'done', finishReason };
 }
 

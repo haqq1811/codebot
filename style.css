@@ -245,6 +245,7 @@ header {
   margin-top: 8px;
   font-size: .75rem;
   color: var(--text-faint);
+  white-space: pre-line; /* model name on one line, timing on the next */
 }
 
 .retry-btn {
