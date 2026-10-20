@@ -5,12 +5,14 @@
    ========================================================================== */
 
 /* ---------- 1. Config ---------- */
-import { keyStore, loadCatalogCache, saveCatalogCache } from './storage.js';
+import { keyStore, memoryStore, loadCatalogCache, saveCatalogCache } from './storage.js';
 import {
   streamChat, fetchOpenRouterModels, fetchGeminiModels, setCatalog, getCatalog,
   orderOpenRouterModels, orderGeminiModels, parseModelValue, modelValue,
   GEMINI_DEFAULTS, DEFAULT_SYSTEM_PROMPT, PROVIDER_NAMES, pricingTag,
+  completeOnce, pickHelperModel,
 } from './engine.js';
+import { prepareRequest, maintain, mergeNotes } from './memory.js';
 
 // API keys live in storage.js; this is only the UI state we remember.
 const STORAGE = { model: 'GEMINI_MODEL', sidebar: 'GEMINI_SIDEBAR_OPEN' };
@@ -85,6 +87,11 @@ const state = {
   sessionId: newId(),
   generating: false,
   abort: null,
+  summary: '',               // this chat's rolling summary of its older messages
+  summarizedCount: 0,        // how many messages from the start the summary covers
+  notesCursor: 0,            // how far this chat has been read for memory notes
+  memoryBusy: false,         // background upkeep is running
+  memoryRerun: false,        // an answer finished while it was running
 };
 
 let nextAttachmentId = 0;
@@ -853,9 +860,18 @@ async function runTurn(turn) {
   let failure = null;
 
   try {
+    // Send the notes, this chat's summary and only the newest messages, not the whole chat
+    const memory = memoryStore.load();
+    const request = prepareRequest({
+      history: state.history,
+      summary: state.summary,
+      summarizedCount: state.summarizedCount,
+      notes: memory.enabled ? memory.notes : [],
+      base: DEFAULT_SYSTEM_PROMPT,
+    });
     const stream = streamChat({
-      messages: state.history,
-      system: DEFAULT_SYSTEM_PROMPT,
+      messages: request.messages,
+      system: request.system,
       selected,
       keys: keyStore.all(),
       signal,
@@ -904,6 +920,7 @@ async function runTurn(turn) {
     if (failure && !stopped) toast(describeError(failure).message, 5000);
     scrollToBottom();
     saveCurrentSession();
+    if (!failure && !stopped) runMemoryUpkeep(); // not awaited: it never delays anything
     return;
   }
 
@@ -1035,6 +1052,9 @@ async function saveCurrentSession() {
       title: makeTitle(state.ui),
       messages: state.history,
       ui: state.ui,
+      summary: state.summary,
+      summarizedCount: state.summarizedCount,
+      notesCursor: state.notesCursor,
       timestamp: Date.now(),
     });
     renderHistoryList();
@@ -1078,6 +1098,9 @@ function resetConversation() {
   state.sessionId = newId();
   state.history = [];
   state.ui = [];
+  state.summary = '';
+  state.summarizedCount = 0;
+  state.notesCursor = 0;
   clearAttachments();
   clearTranscript();
 }
@@ -1098,6 +1121,9 @@ async function loadSession(id) {
   state.sessionId = session.id;
   state.history = (session.messages ?? []).map(normalizeTurn).filter(Boolean);
   state.ui = session.ui ?? deriveUi(state.history);
+  state.summary = session.summary ?? '';
+  state.summarizedCount = Math.min(session.summarizedCount ?? 0, state.history.length);
+  state.notesCursor = Math.min(session.notesCursor ?? 0, state.history.length);
   renderTranscript();
 
   if (!desktopMQ.matches) setSidebar(false);
@@ -1202,6 +1228,137 @@ function wireDragAndDrop() {
   });
 }
 
+/* ---------- Memory: background upkeep + the Memory screen ---------- */
+
+/**
+ * Runs after an answer is shown. A cheap model folds old messages into this chat's summary and
+ * picks out lasting facts about you. If anything fails, nothing changes and it is tried again later.
+ */
+async function runMemoryUpkeep() {
+  if (state.memoryBusy) { state.memoryRerun = true; return; } // run once more when the current job ends
+  state.memoryBusy = true;
+  const snap = {
+    id: state.sessionId,
+    history: state.history.slice(),
+    summary: state.summary,
+    summarizedCount: state.summarizedCount,
+    notesCursor: state.notesCursor,
+  };
+
+  try {
+    const keys = keyStore.all();
+    const memory = memoryStore.load();
+    const helper = pickHelperModel(keys, parseModelValue(els.modelSelect.value));
+    const { errors } = await maintain({
+      history: snap.history,
+      summary: snap.summary,
+      summarizedCount: snap.summarizedCount,
+      notesCursor: snap.notesCursor,
+      notes: memory.notes,
+      notesEnabled: memory.enabled,
+      complete: (system, prompt) => completeOnce({ system, prompt, selected: helper, keys }),
+      onStep: (changes) => applyMemoryChanges(snap, changes), // each result is used the moment it is ready
+    });
+    errors.forEach((err) => console.warn('[memory] a step failed, it will be retried later:', err));
+  } catch (err) {
+    console.warn('[memory] upkeep failed:', err);
+  } finally {
+    state.memoryBusy = false;
+    if (state.memoryRerun) { state.memoryRerun = false; runMemoryUpkeep(); }
+  }
+}
+
+/** Stores one finished upkeep step. `snap.id` is the chat it was computed for. */
+async function applyMemoryChanges(snap, changes) {
+  if (changes.addedNotes?.length) { // notes belong to every chat, so keep them even if you switched chats
+    const fresh = memoryStore.load();  // re-read: you may have edited the notes meanwhile
+    memoryStore.save({ ...fresh, notes: mergeNotes(fresh.notes, changes.addedNotes) });
+    if (!memoryEls.modal.hidden) renderMemoryModal();
+    console.log('[memory] new notes:', changes.addedNotes);
+  }
+
+  if (state.sessionId !== snap.id) return; // you opened another chat meanwhile: it is redone later
+  let dirty = false;
+  if (changes.summary !== undefined) {
+    state.summary = changes.summary;
+    state.summarizedCount = changes.summarizedCount;
+    console.log(`[memory] summary updated: first ${state.summarizedCount} messages folded in`);
+    dirty = true;
+  }
+  if (changes.notesCursor !== undefined) { state.notesCursor = changes.notesCursor; dirty = true; }
+  if (dirty) await saveCurrentSession();
+}
+
+const memoryEls = {
+  modal: $('memory-modal'), list: $('memory-list'), enabled: $('memory-enabled'),
+  addInput: $('memory-add-input'), addBtn: $('memory-add-btn'), status: $('memory-chat-status'),
+  openBtn: $('memory-btn'), closeBtn: $('close-memory-btn'), clearBtn: $('clear-memory-btn'),
+};
+
+function renderMemoryModal() {
+  const memory = memoryStore.load();
+  memoryEls.enabled.checked = memory.enabled;
+
+  const items = memory.notes.map((note) => {
+    const li = el('li', 'memory-item');
+    li.append(el('span', 'memory-text', note));
+    const del = el('button', 'memory-del', '×');
+    del.type = 'button';
+    del.setAttribute('aria-label', `Delete note: ${note}`);
+    del.addEventListener('click', () => {
+      const current = memoryStore.load();
+      memoryStore.save({ ...current, notes: current.notes.filter((n) => n !== note) });
+      renderMemoryModal();
+    });
+    li.append(del);
+    return li;
+  });
+  memoryEls.list.replaceChildren(...(items.length ? items : [el('li', 'history-empty', 'No notes yet. They appear as you chat.')]));
+
+  const total = state.history.length;
+  memoryEls.status.textContent = total
+    ? `This chat: ${total} messages; ${state.summarizedCount ? `the first ${state.summarizedCount} are summarized` : 'none summarized yet'}.`
+    : 'This chat is empty.';
+}
+
+function openMemoryModal() {
+  lastFocus = document.activeElement;
+  if (!desktopMQ.matches) setSidebar(false);
+  renderMemoryModal();
+  memoryEls.modal.hidden = false;
+}
+
+function closeMemoryModal() {
+  memoryEls.modal.hidden = true;
+  lastFocus?.focus?.();
+  lastFocus = null;
+}
+
+function addMemoryNote() {
+  const text = memoryEls.addInput.value.trim().replace(/\s+/g, ' ').slice(0, 200);
+  if (!text) return;
+  const current = memoryStore.load();
+  memoryStore.save({ ...current, notes: mergeNotes(current.notes, [text]) });
+  memoryEls.addInput.value = '';
+  renderMemoryModal();
+}
+
+function wireMemoryModal() {
+  memoryEls.openBtn.addEventListener('click', openMemoryModal);
+  memoryEls.closeBtn.addEventListener('click', closeMemoryModal);
+  memoryEls.modal.addEventListener('click', (e) => { if (e.target === memoryEls.modal) closeMemoryModal(); });
+  memoryEls.enabled.addEventListener('change', () => {
+    memoryStore.save({ ...memoryStore.load(), enabled: memoryEls.enabled.checked });
+  });
+  memoryEls.addBtn.addEventListener('click', addMemoryNote);
+  memoryEls.addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addMemoryNote(); });
+  memoryEls.clearBtn.addEventListener('click', () => {
+    if (!confirm('Delete all memory notes?')) return;
+    memoryStore.save({ ...memoryStore.load(), notes: [] });
+    renderMemoryModal();
+  });
+}
+
 const offlineBanner = $('offline-banner');
 function syncOnline() {
   if (offlineBanner) offlineBanner.hidden = navigator.onLine;
@@ -1269,6 +1426,7 @@ function init() {
     els.toggleKeyBtn.setAttribute('aria-pressed', String(show));
   });
   els.keyModal.addEventListener('click', (e) => { if (e.target === els.keyModal) closeKeyModal(); });
+  wireMemoryModal();
 
   // Sidebar
   els.menuBtn.addEventListener('click', () => setSidebar(!isSidebarOpen()));
@@ -1280,6 +1438,7 @@ function init() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!els.keyModal.hidden) closeKeyModal();
+    else if (!memoryEls.modal.hidden) closeMemoryModal();
     else if (!desktopMQ.matches && isSidebarOpen()) setSidebar(false);
   });
 

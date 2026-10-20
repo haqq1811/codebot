@@ -29,3 +29,22 @@ export function saveCatalogCache(provider, models) {
   cache[provider] = { models, ts: Date.now() };
   write(CATALOG_KEY, JSON.stringify(cache));
 }
+
+/* ---------- Memory notes (shared by every chat) ---------- */
+
+const MEMORY_KEY = 'MEMORY_NOTES_V1';
+
+export const memoryStore = {
+  /** { enabled: boolean, notes: string[] } */
+  load() {
+    try {
+      const m = JSON.parse(read(MEMORY_KEY));
+      return { enabled: m?.enabled !== false, notes: Array.isArray(m?.notes) ? m.notes.filter((n) => typeof n === 'string') : [] };
+    } catch {
+      return { enabled: true, notes: [] };
+    }
+  },
+  save({ enabled, notes }) {
+    return write(MEMORY_KEY, JSON.stringify({ enabled: enabled !== false, notes }));
+  },
+};

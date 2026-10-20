@@ -906,3 +906,55 @@ body.dragging #main::after {
   background: #3a2e12;
   border-bottom: 1px solid #5c4a1a;
 }
+
+/* ---------- Memory ---------- */
+.sidebar-footer { padding-top: 12px; }
+.sidebar-footer .secondary-btn { width: 100%; }
+
+.toggle-row { display: flex; align-items: center; gap: 10px; font-size: .95rem; color: var(--text); }
+.toggle-row input { width: 20px; height: 20px; flex: none; accent-color: var(--accent-strong); }
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 36vh;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+.memory-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-input);
+  border-radius: var(--radius-sm);
+  font-size: .9rem;
+}
+.memory-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.memory-del {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 1.2rem;
+  line-height: 1;
+}
+.memory-del:hover { background: var(--surface-hover); color: var(--danger); }
+#memory-add-input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+  background: var(--surface-input);
+  color: var(--text-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 1rem;
+}
+#memory-add-input:focus { border-color: var(--accent); outline: none; }
+.memory-status { font-size: .8rem; color: var(--text-faint); }

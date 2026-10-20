@@ -365,6 +365,11 @@ const RUNNERS = { gemini: streamGemini, openrouter: streamOpenRouter };
 
 /* ---------- The engine ---------- */
 
+const idsOf = (provider) => {
+  const list = getCatalog(provider);
+  return (list.length ? list : provider === 'gemini' ? GEMINI_DEFAULTS : []).map((m) => m.id);
+};
+
 /** The chosen model first, then a few alternatives, only from providers that have a key. */
 function buildAttempts(selected, keys) {
   const attempts = [];
@@ -376,11 +381,6 @@ function buildAttempts(selected, keys) {
     attempts.push({ provider, model: id });
     return true;
   };
-  const idsOf = (provider) => {
-    const list = getCatalog(provider);
-    return (list.length ? list : provider === 'gemini' ? GEMINI_DEFAULTS : []).map((m) => m.id);
-  };
-
   add(selected.provider, selected.id);
   let extra = 0;
   for (const id of idsOf(selected.provider)) {
@@ -432,4 +432,31 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
     }
   }
   throw lastError ?? new Error('No model is available.');
+}
+
+/* ---------- Background helpers (summaries, notes) ---------- */
+
+/** A cheap model for background work: a free-tier Gemini Flash(-Lite), else a free OpenRouter model, else the one in use. */
+export function pickHelperModel(keys, selected) {
+  if (keys.gemini) {
+    const ids = idsOf('gemini');
+    const id = ids.find((i) => GEMINI_FREE_TIER.has(i) && /flash-lite/.test(i))
+      || ids.find((i) => GEMINI_FREE_TIER.has(i) && /flash/.test(i));
+    if (id) return { provider: 'gemini', id };
+  }
+  if (keys.openrouter) {
+    const free = getCatalog('openrouter').find((m) => m.free === true);
+    if (free) return { provider: 'openrouter', id: free.id };
+  }
+  return selected;
+}
+
+/** One prompt in, the whole answer out. Nothing is shown to the user. */
+export async function completeOnce({ system, prompt, selected, keys, signal }) {
+  let text = '';
+  const stream = streamChat({ messages: [{ role: 'user', content: prompt }], system, selected, keys, signal });
+  for await (const chunk of stream) {
+    if (chunk.type === 'text') text += chunk.delta;
+  }
+  return text;
 }

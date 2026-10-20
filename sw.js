@@ -13,10 +13,10 @@
    ========================================================================== */
 
 // Bump this only to throw away every saved file. Normal deploys do not need it.
-const CACHE = 'studio-v2';
+const CACHE = 'studio-v1';
 
 // If a deploy changes this list, the page picks it up the next time it is online.
-const CORE = ['./', './index.html', './app.js', './engine.js', './storage.js', './style.css', './manifest.json'];
+const CORE = ['./', './index.html', './app.js', './engine.js', './storage.js', './memory.js', './style.css', './manifest.json'];
 const NICE_TO_HAVE = ['./icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
 
 // The exact URLs index.html loads. Fetching them now means markdown and code
