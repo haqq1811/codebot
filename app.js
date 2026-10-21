@@ -348,18 +348,19 @@ function createMessage(role) {
 function scrollToBottom(force = false) { if (force) stickToBottom = true; if (stickToBottom) els.chatBox.scrollTop = els.chatBox.scrollHeight; }
 function clearTranscript() { els.chatBox.querySelectorAll('.msg').forEach((n) => n.remove()); syncEmptyState(); }
 
+// [Replace attachMessageActions]
 function attachMessageActions(msgNode, content, index, isUser = false) {
   const actionBar = el('div', 'msg-actions');
   
   const copyBtn = el('button'); copyBtn.title = 'Copy';
-  copyBtn.append(icon('copy'), 'Copy');
+  copyBtn.append(icon('copy'));
   copyBtn.addEventListener('click', async () => {
     const ok = await copyText(content);
     toast(ok ? 'Copied to clipboard.' : 'Copy failed.');
   });
 
   const shareBtn = el('button'); shareBtn.title = 'Share';
-  shareBtn.append(icon('share'), 'Share');
+  shareBtn.append(icon('share'));
   shareBtn.addEventListener('click', async () => {
     if (navigator.share) {
       try { await navigator.share({ text: content }); } catch {}
@@ -367,7 +368,7 @@ function attachMessageActions(msgNode, content, index, isUser = false) {
   });
 
   const retryBtn = el('button'); retryBtn.title = 'Retry';
-  retryBtn.append(icon('refresh'), 'Retry');
+  retryBtn.append(icon('refresh'));
   retryBtn.addEventListener('click', () => retryFrom(index));
 
   actionBar.append(copyBtn, shareBtn, retryBtn);
@@ -537,40 +538,45 @@ async function sendMessage() {
   await runTurn({ message, ui });
 }
 
-async function retryFrom(index) {
+// [Replace retryFrom]
+async function retryFrom(targetIndex) {
   if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
   if (!navigator.onLine) { toast("You're offline."); return; }
 
-  const targetMsg = state.history[index];
-  if (!targetMsg || targetMsg.role !== 'user') return;
+  // Find the user message corresponding to this index
+  let userIndex = targetIndex;
+  while (userIndex >= 0 && state.history[userIndex].role !== 'user') userIndex--;
+  if (userIndex < 0) return;
+
+  // Deep copy the messages we want to keep
+  const targetMsg = JSON.parse(JSON.stringify(state.history[userIndex]));
+  const targetUi = JSON.parse(JSON.stringify(state.ui[userIndex]));
 
   // Slice history and UI to remove everything from this message onwards
-  state.history = state.history.slice(0, index);
-  state.ui = state.ui.slice(0, index);
+  state.history = state.history.slice(0, userIndex);
+  state.ui = state.ui.slice(0, userIndex);
   
   // Reset memory cursor if we are going back far
-  if (state.summarizedCount > index) { state.summarizedCount = index; state.summary = ''; state.notesCursor = Math.min(state.notesCursor, index); }
+  if (state.summarizedCount > userIndex) { 
+    state.summarizedCount = userIndex; 
+    state.summary = ''; 
+    state.notesCursor = Math.min(state.notesCursor, userIndex); 
+  }
   
   renderTranscript();
   
-  // Re-send
-  const message = { ...targetMsg };
-  const ui = state.ui[index] || deriveUi([targetMsg])[0]; // fallback if missing
-  
-  // We can't easily reconstruct the full `ui` array without mutating state deeply, so we just push the ui back.
-  state.history.push(message);
-  state.ui.push(ui);
-  renderUserMessage(ui, index);
-  
-  await runTurn({ message, ui });
+  // Re-send the exact same message turn
+  await runTurn({ message: targetMsg, ui: targetUi });
 }
 
+// [Replace runTurn]
 async function runTurn(turn) {
   state.abort = new AbortController(); const { signal } = state.abort; setBusy(true);
 
+  // Calculate index BEFORE pushing
+  const msgIndex = state.history.length; 
   state.history.push(turn.message);
   state.ui.push(turn.ui);
-  const msgIndex = state.ui.length - 1;
 
   const selected = parseModelValue(els.modelSelect.value);
   const used = { provider: selected.provider, model: selected.id };
@@ -616,6 +622,7 @@ async function runTurn(turn) {
     state.history.push({ role: 'assistant', content: result.text, thoughts: result.thoughts, model: result.model, provider: used.provider });
     state.ui.push({ role: 'ai', text: result.text, thoughts: result.thoughts, model: result.model, stats: result.stats });
 
+    // Pass msgIndex (which is the user message index) to renderAssistant
     renderAssistant(bubble, result, { final: true, note: stopped ? 'stopped' : failure ? 'interrupted' : '', index: msgIndex });
     if (failure && !stopped) { console.warn(failure); toast(describeError(failure).message, 5000); }
     scrollToBottom(); saveCurrentSession();
