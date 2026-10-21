@@ -161,29 +161,34 @@ header {
 .msg-thumb { flex: none; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; background: rgba(255,255,255,.16); }
 
 /* Action Buttons (Copy, Share, Retry) */
+/* Update the Action Buttons to be icon-only, borderless, and closer together */
 .msg-actions {
   display: flex;
-  gap: 12px;
+  gap: 4px; /* Tight spacing */
   margin-top: 12px;
   margin-bottom: 4px;
 }
 .msg-actions button {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   background: transparent;
   color: var(--text-faint);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 0.8rem;
+  border: none; /* Removed border */
+  border-radius: 6px;
   transition: all 0.2s;
 }
 .msg-actions button:hover {
   background: var(--surface-hover);
   color: var(--text-strong);
 }
-.msg-actions button .icon { width: 14px; height: 14px; }
+.msg-actions button .icon {
+  width: 18px;
+  height: 18px;
+}
 
 .msg-meta { margin-top: 8px; font-size: .75rem; color: var(--text-faint); white-space: pre-line; }
 
