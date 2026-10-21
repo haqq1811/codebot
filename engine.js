@@ -15,7 +15,6 @@ export const DEFAULT_SYSTEM_PROMPT =
   'You are a helpful, accurate assistant. Reply in clean Markdown. ' +
   'Put code in fenced blocks and always label the language, for example ```python.';
 
-/** Real, currently-published Gemini model IDs, used before the live catalog arrives. */
 export const GEMINI_DEFAULTS = [
   { id: 'gemini-2.5-flash', label: '2.5 Flash' },
   { id: 'gemini-2.5-flash-lite', label: '2.5 Flash Lite' },
@@ -25,8 +24,6 @@ export const GEMINI_DEFAULTS = [
 
 /* ---------- Pricing tags ---------- */
 
-/* Gemini's model list carries no pricing, so this table is kept by hand.
-   Update it when Google's free tier changes. Unknown models get no tag. */
 const GEMINI_FREE_TIER = new Set([
   'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
   'gemini-2.0-flash', 'gemini-2.0-flash-lite',
@@ -41,8 +38,6 @@ export function pricingTag(provider, model) {
   return '';
 }
 
-/* ---------- Model values: "provider:id" ---------- */
-
 export const modelValue = (provider, id) => `${provider}:${id}`;
 
 export function parseModelValue(value = '') {
@@ -50,8 +45,6 @@ export function parseModelValue(value = '') {
   if (match) return { provider: match[1], id: match[2] };
   return { provider: 'gemini', id: value };
 }
-
-/* ---------- In-memory catalogs ---------- */
 
 const catalogs = { gemini: [], openrouter: [] };
 export const setCatalog = (provider, models) => { catalogs[provider] = Array.isArray(models) ? models : []; };
@@ -69,7 +62,7 @@ async function httpError(res) {
     } catch {
       if (text) message = text.slice(0, 300);
     }
-  } catch { /* body unreadable */ }
+  } catch {}
   return Object.assign(new Error(message), { status: res.status });
 }
 
@@ -175,16 +168,26 @@ async function* sseData(res) {
     const tail = payload(buf);
     if (tail) yield tail;
   } finally {
-    try { await reader.cancel(); } catch { /* already closed */ }
+    try { await reader.cancel(); } catch {}
   }
+}
+
+/* ---------- Timeout Helper ---------- */
+// Ensures that if a provider hangs (e.g. dead model), we abort and fall back quickly.
+function fetchWithTimeout(resource, options = {}) {
+  const { timeout = 25000 } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  
+  const combinedSignal = options.signal 
+    ? AbortSignal.any([options.signal, controller.signal]) 
+    : controller.signal;
+
+  return fetch(resource, { ...options, signal: combinedSignal }).finally(() => clearTimeout(id));
 }
 
 /* ---------- Gemini ---------- */
 
-/**
- * Wraps a text file in a fence *longer* than any run of backticks in the content,
- * so Markdown documents with triple-backticks inside don't break the layout.
- */
 function fileAsText(f) {
   const text = String(f.text ?? '');
   const runs = text.match(/`+/g);
@@ -221,16 +224,15 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     if (includeThoughts) body.generationConfig = { thinkingConfig: { includeThoughts: true } };
 
-    res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
+    res = await fetchWithTimeout(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify(body),
       signal,
     });
+    
     if (res.ok) break;
     const err = await httpError(res);
-    // Narrow: only retry when the message mentions the thinkingConfig field (or its synonyms).
-    // Previously `/think/i` matched unrelated 400s like "thinking budget must be positive".
     if (includeThoughts && err.status === 400 &&
         /thinkingConfig|includeThoughts|thinking (?:is )?not supported|does not support thinking/i.test(err.message)) {
       includeThoughts = false;
@@ -315,7 +317,7 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
   const { messages: body, skipped } = toOpenRouterMessages(messages, system);
   if (skipped.length) yield { type: 'notice', message: `OpenRouter skipped files it can't read: ${skipped.join(', ')}` };
 
-  const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+  const res = await fetchWithTimeout(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -344,7 +346,6 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
     const choice = json.choices?.[0];
     const delta = choice?.delta ?? {};
 
-    // Some providers (Anthropic-style) send content as an array of parts, not a string.
     const reasoning = delta.reasoning ?? delta.reasoning_content
       ?? (Array.isArray(delta.reasoning_details) ? delta.reasoning_details.map((d) => d.text || d.summary || '').join('') : '');
     if (reasoning) { gotThought = true; yield { type: 'thought', delta: reasoning }; }
@@ -444,18 +445,21 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
       }
       return;
     } catch (err) {
-      if (signal?.aborted || isAbort(err)) return;
-      lastError = err;
-      if (produced) throw err;
+      if (signal?.aborted) return; // User explicitly pressed Stop
+      
+      // If it was an internal timeout (AbortError), we treat it as a normal failure to trigger fallback
+      lastError = err.name === 'AbortError' ? new Error('Model took too long to respond.') : err;
+      
+      if (produced) throw lastError;
       const next = attempts[i + 1];
-      if (!next || !shouldFallback(err)) throw err;
-      yield { type: 'fallback', from: target, to: next, reason: String(err?.message ?? err).slice(0, 80) };
+      if (!next || !shouldFallback(lastError)) throw lastError;
+      yield { type: 'fallback', from: target, to: next, reason: String(lastError?.message ?? lastError).slice(0, 80) };
     }
   }
   throw lastError ?? new Error('No model is available.');
 }
 
-/* ---------- Background helpers (summaries, notes) ---------- */
+/* ---------- Background helpers ---------- */
 
 export function pickHelperModel(keys, selected) {
   if (keys.gemini) {
@@ -471,10 +475,6 @@ export function pickHelperModel(keys, selected) {
   return selected;
 }
 
-/**
- * One prompt in, the whole answer out. Times out on its own so a stalled helper
- * (rate-limited provider, silent connection) never latches `state.memoryBusy` in app.js.
- */
 export async function completeOnce({ system, prompt, selected, keys, timeoutMs = 20_000 }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -490,10 +490,7 @@ export async function completeOnce({ system, prompt, selected, keys, timeoutMs =
     for await (const chunk of stream) {
       if (chunk.type === 'text') text += chunk.delta;
     }
-    if (controller.signal.aborted) {
-      // Discard any partial text — a half-finished summary would corrupt the running state.
-      throw new Error('Helper model timed out');
-    }
+    if (controller.signal.aborted) throw new Error('Helper model timed out');
     return text;
   } finally {
     clearTimeout(timer);
