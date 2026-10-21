@@ -3,7 +3,7 @@
    ========================================================================== */
 
 // Bumped after the fix pass; old v2 caches are deleted on activate.
-const CACHE = 'studio-v4';
+const CACHE = 'studio-v5';
 
 const CORE = ['./', './index.html', './app.js', './engine.js', './storage.js', './memory.js', './style.css', './manifest.json'];
 const NICE_TO_HAVE = ['./icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
