@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <!-- viewport-fit=cover: draw under notches. interactive-widget: the on-screen keyboard resizes the page instead of covering the input. -->
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#181818">
@@ -16,19 +15,15 @@
 
   <title>Gemini Mobile Studio</title>
 
-  <!-- highlight.js theme first so style.css can override it without !important -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <link rel="stylesheet" href="style.css">
 
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-  <!-- Sanitizes model output before it is inserted into the page -->
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-
 </head>
 
 <body>
-  <!-- Icon sprite: one definition, reused with <use href="#i-name"> -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
     <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
@@ -43,11 +38,13 @@
     <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
     <symbol id="i-code" viewBox="0 0 24 24"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></symbol>
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></symbol>
+    <!-- New Action Icons -->
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></symbol>
   </svg>
 
   <div id="app">
-
-    <!-- Chat history: slide-over drawer on phones, docked column on desktop -->
     <div id="sidebar-overlay" class="overlay"></div>
     <aside id="sidebar" class="sidebar" aria-label="Chat history">
       <div class="sidebar-header">
@@ -56,9 +53,7 @@
           <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg> New Chat
         </button>
       </div>
-      <div id="history-list" class="history-list">
-        <!-- Saved sessions are rendered here -->
-      </div>
+      <div id="history-list" class="history-list"></div>
       <div class="sidebar-footer">
         <button id="memory-btn" class="secondary-btn" type="button">Memory</button>
       </div>
@@ -74,17 +69,11 @@
         </div>
 
         <div class="header-controls">
-          <select id="model-select" class="model-select" aria-label="Model">
-            <option value="gemini:gemini-3.8-flash">3.8 Flash</option>
-            <option value="gemini:gemini-3.5-flash-lite">3.5 Flash Lite</option>
-            <option value="gemini:gemini-2.5-flash">2.5 Flash</option>
-            <option value="gemini:gemini-2.5-pro">2.5 Pro</option>
-          </select>
           <button id="clear-chat-btn" class="hdr-btn" type="button" title="Clear this chat" aria-label="Clear this chat">
-            <svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg><span class="btn-label">Clear</span>
+            <svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg>
           </button>
           <button id="key-btn" class="hdr-btn" type="button" title="API key" aria-label="API key">
-            <svg class="icon" aria-hidden="true"><use href="#i-key"/></svg><span class="btn-label">Key</span>
+            <svg class="icon" aria-hidden="true"><use href="#i-key"/></svg>
           </button>
         </div>
       </header>
@@ -101,6 +90,7 @@
         </div>
       </main>
 
+      <!-- Modern Composer -->
       <div id="composer">
         <div id="file-preview-bar" hidden>
           <div id="thumb-strip" role="list" aria-label="Attachments"></div>
@@ -110,35 +100,48 @@
           </div>
         </div>
 
-        <div id="input-area">
-          <button id="attach-btn" class="file-upload-label" type="button" title="Attach files" aria-label="Attach files">
-            <svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg>
-          </button>
-          <input type="file" id="file-input" multiple hidden>
+        <div id="composer-container">
+          <textarea id="user-input" rows="1" placeholder="Chat here..." aria-label="Message" enterkeyhint="enter" autocomplete="off"></textarea>
+          
+          <div id="composer-controls">
+            <div class="composer-left">
+              <button id="attach-btn" class="composer-icon-btn" type="button" title="Attach files" aria-label="Attach files">
+                <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>
+              </button>
+              <input type="file" id="file-input" multiple hidden>
+              
+              <div class="model-select-wrapper">
+                <select id="model-select" class="modern-select" aria-label="Model">
+                  <option value="gemini:gemini-2.5-flash">2.5 Flash</option>
+                  <option value="gemini:gemini-2.5-flash-lite">2.5 Flash Lite</option>
+                  <option value="gemini:gemini-2.5-pro">2.5 Pro</option>
+                  <option value="gemini:gemini-2.0-flash">2.0 Flash</option>
+                </select>
+              </div>
+            </div>
 
-          <textarea id="user-input" rows="1" placeholder="Type a message..." aria-label="Message" enterkeyhint="send" autocomplete="off"></textarea>
-
-          <button id="send-btn" class="send-btn" type="button" aria-label="Send">
-            <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg><span class="btn-label">Send</span>
-          </button>
+            <div class="composer-right">
+              <button id="send-btn" class="composer-send-btn" type="button" aria-label="Send">
+                <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- API key modal (hidden until opened) -->
+  <!-- Modals & Toast (unchanged) -->
   <div id="key-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="key-modal-title" hidden>
     <div class="modal-content">
       <h3 id="key-modal-title">API Keys</h3>
       <p>Saved only in this browser. Add one or both.</p>
-
       <label class="key-label" for="api-key-input">Google AI Studio (Gemini) &middot;
         <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">get a key</a></label>
       <div class="key-row">
         <input type="password" id="api-key-input" placeholder="Gemini API key" autocomplete="off" autocapitalize="off" spellcheck="false">
         <button id="toggle-key-btn" class="secondary-btn" type="button" aria-pressed="false">Show</button>
       </div>
-
       <label class="key-label" for="openrouter-key-input">OpenRouter &middot;
         <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">get a key</a></label>
       <div class="key-row">
@@ -152,24 +155,17 @@
     </div>
   </div>
 
-  <!-- Memory modal (hidden until opened) -->
   <div id="memory-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="memory-modal-title" hidden>
     <div class="modal-content">
       <h3 id="memory-modal-title">Memory</h3>
-      <p>Short notes about you that every chat can use. They are picked out of your messages automatically and sent
-        with each request, to whichever model you choose. Long chats are also summarized in the background so they stay fast.</p>
-
+      <p>Short notes about you that every chat can use. They are picked out of your messages automatically and sent with each request, to whichever model you choose.</p>
       <label class="toggle-row"><input type="checkbox" id="memory-enabled"> Remember things about me across chats</label>
-
       <ul id="memory-list" class="memory-list"></ul>
-
       <div class="key-row">
         <input type="text" id="memory-add-input" placeholder="Add a note..." maxlength="200" autocomplete="off">
         <button id="memory-add-btn" class="secondary-btn" type="button">Add</button>
       </div>
-
       <p id="memory-chat-status" class="memory-status"></p>
-
       <div class="modal-buttons">
         <button id="close-memory-btn" class="primary-btn" type="button">Done</button>
       </div>
@@ -177,11 +173,22 @@
     </div>
   </div>
 
-  <div id="toast" role="status" aria-live="polite"></div>
-  <!-- Mobile debug console. Delete these two lines when you no longer need it. -->
-  <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-  <script>if (window.eruda) eruda.init();</script>
+  <!-- Custom Context Menu for long press -->
+  <div id="context-menu" class="context-menu" hidden>
+    <button id="ctx-copy" type="button"><svg class="icon"><use href="#i-copy"/></svg> Copy</button>
+    <button id="ctx-retry" type="button"><svg class="icon"><use href="#i-refresh"/></svg> Retry</button>
+  </div>
 
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    if (new URLSearchParams(location.search).has('debug') || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/eruda';
+      s.onload = () => window.eruda && window.eruda.init();
+      document.head.appendChild(s);
+    }
+  </script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

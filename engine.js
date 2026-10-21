@@ -1,29 +1,12 @@
 /* ==========================================================================
    engine.js — one chat engine, several providers
-   streamChat() talks to Google AI Studio (Gemini) or OpenRouter over plain
-   fetch + SSE (no SDK) and yields the same chunk types for both, so app.js
-   never needs to know which provider answered.
-
-   Chunks yielded by streamChat():
-     { type: 'status',   provider, model }
-     { type: 'text',     delta }
-     { type: 'thought',  delta }
-     { type: 'fallback', from: {provider, model}, to: {provider, model}, reason }
-     { type: 'notice',   message }
-     { type: 'usage',    promptTokens, outputTokens, thoughtTokens }  (only if the provider reports them)
-     { type: 'done',     finishReason }
-
-   Messages (what app.js keeps in state.history):
-     { role: 'user',      content, files?: [{ name, mime, data?, text? }] }
-     { role: 'assistant', content }
-   `data` is base64, `text` is the raw text of a code/text file.
    ========================================================================== */
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
-const SAME_PROVIDER_FALLBACKS = 2;   // extra models tried from the same provider
-const OTHER_PROVIDER_FALLBACKS = 1;  // extra models tried from the other provider (only if it has a key)
+const SAME_PROVIDER_FALLBACKS = 2;
+const OTHER_PROVIDER_FALLBACKS = 1;
 
 export const PROVIDERS = ['gemini', 'openrouter'];
 export const PROVIDER_NAMES = { gemini: 'Google AI Studio', openrouter: 'OpenRouter' };
@@ -32,26 +15,25 @@ export const DEFAULT_SYSTEM_PROMPT =
   'You are a helpful, accurate assistant. Reply in clean Markdown. ' +
   'Put code in fenced blocks and always label the language, for example ```python.';
 
-/** Shown until the live model list has been fetched (or when there is no Gemini key yet). */
+/** Real, currently-published Gemini model IDs, used before the live catalog arrives. */
 export const GEMINI_DEFAULTS = [
-  { id: 'gemini-3.8-flash', label: '3.8 Flash' },
-  { id: 'gemini-3.5-flash-lite', label: '3.5 Flash Lite' },
   { id: 'gemini-2.5-flash', label: '2.5 Flash' },
+  { id: 'gemini-2.5-flash-lite', label: '2.5 Flash Lite' },
   { id: 'gemini-2.5-pro', label: '2.5 Pro' },
+  { id: 'gemini-2.0-flash', label: '2.0 Flash' },
 ];
 
 /* ---------- Pricing tags ---------- */
 
 /* Gemini's model list carries no pricing, so this table is kept by hand.
-   Source: Google's pricing page (ai.google.dev/gemini-api/docs/pricing), checked 15 Oct 2026.
-   Update it when Google changes the free tier. Models in neither list get no tag. */
+   Update it when Google's free tier changes. Unknown models get no tag. */
 const GEMINI_FREE_TIER = new Set([
-  'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite',
-  'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-pro',
+  'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
+  'gemini-2.0-flash', 'gemini-2.0-flash-lite',
+  'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro',
 ]);
-const GEMINI_PAID_ONLY = new Set(['gemini-4-argon', 'gemini-3.1-pro-preview', 'gemini-3.1-pro-preview-customtools']);
+const GEMINI_PAID_ONLY = new Set([]);
 
-/** " (Free)", " (Free tier)", " (Paid)" or "" (price unknown) for a catalog entry. */
 export function pricingTag(provider, model) {
   if (provider === 'openrouter') return model.free === true ? ' (Free)' : model.free === false ? ' (Paid)' : '';
   if (GEMINI_FREE_TIER.has(model.id)) return ' (Free tier)';
@@ -63,11 +45,10 @@ export function pricingTag(provider, model) {
 
 export const modelValue = (provider, id) => `${provider}:${id}`;
 
-/** OpenRouter ids contain ":" and "/", so only the first colon is the separator. */
 export function parseModelValue(value = '') {
   const match = /^(gemini|openrouter):([\s\S]+)$/.exec(value);
   if (match) return { provider: match[1], id: match[2] };
-  return { provider: 'gemini', id: value }; // un-prefixed ids saved by older versions were always Gemini
+  return { provider: 'gemini', id: value };
 }
 
 /* ---------- In-memory catalogs ---------- */
@@ -88,13 +69,12 @@ async function httpError(res) {
     } catch {
       if (text) message = text.slice(0, 300);
     }
-  } catch { /* body unreadable: keep the status line */ }
+  } catch { /* body unreadable */ }
   return Object.assign(new Error(message), { status: res.status });
 }
 
 const isAbort = (err) => err?.name === 'AbortError';
 
-/** Another model might succeed (overload, quota, missing model). Bad keys, bad payloads and network drops won't. */
 function shouldFallback(err) {
   if (err?.fatal || err instanceof TypeError) return false;
   const status = Number(err?.status) || null;
@@ -124,17 +104,14 @@ export async function fetchGeminiModels(apiKey, signal) {
   return models;
 }
 
-// Not chat models, or models that reject system prompts / plain text chat
 const GEMINI_SKIP = /(embedding|aqa|imagen|veo|tts|image|live|audio|robotics|computer-use|learnlm|gemma|vision|omni|lyria|deep-research)/i;
 
-/** Free-tier models first, then unknown, then paid-only. Inside each group: newest version first,
- *  then Flash, Flash-Lite, Pro; stable before preview. Fallbacks walk this list, so they try free models first. */
 export function orderGeminiModels(models) {
   const rank = (id) => {
     const v = /^gemini-(\d+(?:\.\d+)?)/.exec(id);
     return {
       cost: GEMINI_FREE_TIER.has(id) ? 0 : GEMINI_PAID_ONLY.has(id) ? 2 : 1,
-      version: v ? parseFloat(v[1]) : 0, // "-latest" aliases (no version) sink to the bottom
+      version: v ? parseFloat(v[1]) : 0,
       preview: /preview|exp/.test(id) ? 1 : 0,
       tier: /flash-lite/.test(id) ? 1 : /flash/.test(id) ? 0 : /pro/.test(id) ? 2 : 3,
     };
@@ -147,7 +124,6 @@ export function orderGeminiModels(models) {
     .map((x) => x.m);
 }
 
-/** The public model list needs no key. */
 export async function fetchOpenRouterModels(signal) {
   const res = await fetch(`${OPENROUTER_BASE}/models`, { signal });
   if (!res.ok) throw await httpError(res);
@@ -159,9 +135,7 @@ export async function fetchOpenRouterModels(signal) {
     const priced = Number.isFinite(prompt) && Number.isFinite(completion);
     return {
       id: m.id,
-      // OpenRouter already writes "(free)" into some names; the dropdown adds its own tag
       label: (m.name || m.id).replace(/\s*\(free\)\s*$/i, ''),
-      // true = free, false = paid (including variable pricing), null = pricing not listed
       free: /:free$/.test(m.id) || (priced && prompt === 0 && completion === 0) ? true : priced ? false : null,
       ctx: m.context_length ?? 0,
       input: m.architecture?.input_modalities ?? ['text'],
@@ -170,7 +144,6 @@ export async function fetchOpenRouterModels(signal) {
   });
 }
 
-/** Text-output models only; free ones first, then A to Z. (Gemini's model list says nothing about pricing, so those carry no tag.) */
 export function orderOpenRouterModels(models) {
   return models
     .filter((m) => m.output.includes('text'))
@@ -179,7 +152,6 @@ export function orderOpenRouterModels(models) {
 
 /* ---------- Server-sent events ---------- */
 
-/** Yields the `data:` payload of every event in a streaming response. */
 async function* sseData(res) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -209,7 +181,17 @@ async function* sseData(res) {
 
 /* ---------- Gemini ---------- */
 
-const fileAsText = (f) => `File: ${f.name}\n\`\`\`\n${f.text}\n\`\`\``;
+/**
+ * Wraps a text file in a fence *longer* than any run of backticks in the content,
+ * so Markdown documents with triple-backticks inside don't break the layout.
+ */
+function fileAsText(f) {
+  const text = String(f.text ?? '');
+  const runs = text.match(/`+/g);
+  const longest = runs ? Math.max(...runs.map((r) => r.length)) : 0;
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `File: ${f.name}\n${fence}\n${text}\n${fence}`;
+}
 
 function toGeminiContents(messages) {
   const contents = [];
@@ -225,7 +207,7 @@ function toGeminiContents(messages) {
     if (m.content) parts.push({ text: m.content });
     if (!parts.length) continue;
     const last = contents[contents.length - 1];
-    if (last && last.role === role) last.parts.push(...parts); // the API wants alternating turns
+    if (last && last.role === role) last.parts.push(...parts);
     else contents.push({ role, parts });
   }
   return contents;
@@ -234,7 +216,7 @@ function toGeminiContents(messages) {
 async function* streamGemini({ model, apiKey, messages, system, signal }) {
   let includeThoughts = true;
   let res;
-  for (;;) { // at most two passes: with the thinking config, then without it
+  for (;;) {
     const body = { contents: toGeminiContents(messages) };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     if (includeThoughts) body.generationConfig = { thinkingConfig: { includeThoughts: true } };
@@ -247,7 +229,13 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
     });
     if (res.ok) break;
     const err = await httpError(res);
-    if (includeThoughts && err.status === 400 && /think/i.test(err.message)) { includeThoughts = false; continue; }
+    // Narrow: only retry when the message mentions the thinkingConfig field (or its synonyms).
+    // Previously `/think/i` matched unrelated 400s like "thinking budget must be positive".
+    if (includeThoughts && err.status === 400 &&
+        /thinkingConfig|includeThoughts|thinking (?:is )?not supported|does not support thinking/i.test(err.message)) {
+      includeThoughts = false;
+      continue;
+    }
     throw err;
   }
 
@@ -278,7 +266,7 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
     const reason = blockReason || finishReason;
     throw Object.assign(
       new Error(reason ? `The model returned no text (${reason}).` : 'The model returned an empty response.'),
-      { fatal: true }, // every model would answer the same way
+      { fatal: true },
     );
   }
   if (!gotText) yield { type: 'notice', message: `The model finished without an answer${finishReason ? ` (${finishReason})` : ''}.` };
@@ -348,18 +336,30 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
   for await (const data of sseData(res)) {
     if (data === '[DONE]') break;
     let json;
-    try { json = JSON.parse(data); } catch { continue; } // keep-alive comments and partial lines
+    try { json = JSON.parse(data); } catch { continue; }
     if (json.error) {
       throw Object.assign(new Error(json.error.message || 'The stream failed.'), { status: Number(json.error.code) || 500 });
     }
-    if (json.usage) usage = json.usage; // arrives in the last chunk, often with no choices
+    if (json.usage) usage = json.usage;
     const choice = json.choices?.[0];
     const delta = choice?.delta ?? {};
 
+    // Some providers (Anthropic-style) send content as an array of parts, not a string.
     const reasoning = delta.reasoning ?? delta.reasoning_content
       ?? (Array.isArray(delta.reasoning_details) ? delta.reasoning_details.map((d) => d.text || d.summary || '').join('') : '');
     if (reasoning) { gotThought = true; yield { type: 'thought', delta: reasoning }; }
-    if (typeof delta.content === 'string' && delta.content) { gotText = true; yield { type: 'text', delta: delta.content }; }
+
+    if (typeof delta.content === 'string' && delta.content) {
+      gotText = true;
+      yield { type: 'text', delta: delta.content };
+    } else if (Array.isArray(delta.content)) {
+      for (const part of delta.content) {
+        if (part?.type === 'text' && typeof part.text === 'string' && part.text) {
+          gotText = true;
+          yield { type: 'text', delta: part.text };
+        }
+      }
+    }
 
     finishReason = choice?.finish_reason || finishReason;
   }
@@ -376,7 +376,7 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
     yield {
       type: 'usage',
       promptTokens: usage.prompt_tokens ?? 0,
-      outputTokens: Math.max((usage.completion_tokens ?? 0) - thinking, 0), // OpenAI-style counts include reasoning
+      outputTokens: Math.max((usage.completion_tokens ?? 0) - thinking, 0),
       thoughtTokens: thinking,
     };
   }
@@ -392,7 +392,6 @@ const idsOf = (provider) => {
   return (list.length ? list : provider === 'gemini' ? GEMINI_DEFAULTS : []).map((m) => m.id);
 };
 
-/** The chosen model first, then a few alternatives, only from providers that have a key. */
 function buildAttempts(selected, keys) {
   const attempts = [];
   const seen = new Set();
@@ -447,7 +446,7 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
     } catch (err) {
       if (signal?.aborted || isAbort(err)) return;
       lastError = err;
-      if (produced) throw err; // part of an answer is already on screen: don't restart elsewhere
+      if (produced) throw err;
       const next = attempts[i + 1];
       if (!next || !shouldFallback(err)) throw err;
       yield { type: 'fallback', from: target, to: next, reason: String(err?.message ?? err).slice(0, 80) };
@@ -458,7 +457,6 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
 
 /* ---------- Background helpers (summaries, notes) ---------- */
 
-/** A cheap model for background work: a free-tier Gemini Flash(-Lite), else a free OpenRouter model, else the one in use. */
 export function pickHelperModel(keys, selected) {
   if (keys.gemini) {
     const ids = idsOf('gemini');
@@ -473,12 +471,31 @@ export function pickHelperModel(keys, selected) {
   return selected;
 }
 
-/** One prompt in, the whole answer out. Nothing is shown to the user. */
-export async function completeOnce({ system, prompt, selected, keys, signal }) {
-  let text = '';
-  const stream = streamChat({ messages: [{ role: 'user', content: prompt }], system, selected, keys, signal });
-  for await (const chunk of stream) {
-    if (chunk.type === 'text') text += chunk.delta;
+/**
+ * One prompt in, the whole answer out. Times out on its own so a stalled helper
+ * (rate-limited provider, silent connection) never latches `state.memoryBusy` in app.js.
+ */
+export async function completeOnce({ system, prompt, selected, keys, timeoutMs = 20_000 }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let text = '';
+    const stream = streamChat({
+      messages: [{ role: 'user', content: prompt }],
+      system,
+      selected,
+      keys,
+      signal: controller.signal,
+    });
+    for await (const chunk of stream) {
+      if (chunk.type === 'text') text += chunk.delta;
+    }
+    if (controller.signal.aborted) {
+      // Discard any partial text — a half-finished summary would corrupt the running state.
+      throw new Error('Helper model timed out');
+    }
+    return text;
+  } finally {
+    clearTimeout(timer);
   }
-  return text;
 }

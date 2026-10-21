@@ -1,9 +1,7 @@
 /* ==========================================================================
    storage.js — API keys and the cached model lists (localStorage only)
-   Every call is wrapped so private-mode / blocked storage never throws.
    ========================================================================== */
 
-// The Gemini key keeps the name app.js always used, so a saved key survives the upgrade.
 const KEY_NAMES = { gemini: 'GEMINI_API_KEY', openrouter: 'OPENROUTER_API_KEY' };
 const CATALOG_KEY = 'MODEL_CATALOG_CACHE_V1';
 
@@ -15,7 +13,6 @@ export const keyStore = {
   get(provider) { return (read(KEY_NAMES[provider]) || '').trim(); },
   set(provider, value) { return write(KEY_NAMES[provider], String(value).trim()); },
   remove(provider) { drop(KEY_NAMES[provider]); },
-  /** { gemini: 'key or empty string', openrouter: '…' } */
   all() { return { gemini: this.get('gemini'), openrouter: this.get('openrouter') }; },
 };
 
@@ -30,16 +27,29 @@ export function saveCatalogCache(provider, models) {
   write(CATALOG_KEY, JSON.stringify(cache));
 }
 
+/** Removes one provider's cached model list (used when its key is deleted). */
+export function removeCatalogCache(provider) {
+  const cache = loadCatalogCache();
+  if (!(provider in cache)) return;
+  delete cache[provider];
+  write(CATALOG_KEY, JSON.stringify(cache));
+}
+
 /* ---------- Memory notes (shared by every chat) ---------- */
 
 const MEMORY_KEY = 'MEMORY_NOTES_V1';
+
+// Defensive upper bound. The active cap is memory.js's MAX_NOTES = 40, enforced by mergeNotes;
+// this only trims hand-edited storage so a huge list can't blow up the system prompt.
+const STORED_NOTES_HARD_CAP = 200;
 
 export const memoryStore = {
   /** { enabled: boolean, notes: string[] } */
   load() {
     try {
       const m = JSON.parse(read(MEMORY_KEY));
-      return { enabled: m?.enabled !== false, notes: Array.isArray(m?.notes) ? m.notes.filter((n) => typeof n === 'string') : [] };
+      const notes = Array.isArray(m?.notes) ? m.notes.filter((n) => typeof n === 'string') : [];
+      return { enabled: m?.enabled !== false, notes: notes.slice(-STORED_NOTES_HARD_CAP) };
     } catch {
       return { enabled: true, notes: [] };
     }
