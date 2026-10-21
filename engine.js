@@ -22,8 +22,6 @@ export const GEMINI_DEFAULTS = [
   { id: 'gemini-2.0-flash', label: '2.0 Flash' },
 ];
 
-/* ---------- Pricing tags ---------- */
-
 const GEMINI_FREE_TIER = new Set([
   'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
   'gemini-2.0-flash', 'gemini-2.0-flash-lite',
@@ -50,8 +48,6 @@ const catalogs = { gemini: [], openrouter: [] };
 export const setCatalog = (provider, models) => { catalogs[provider] = Array.isArray(models) ? models : []; };
 export const getCatalog = (provider) => catalogs[provider] ?? [];
 
-/* ---------- Errors ---------- */
-
 async function httpError(res) {
   let message = `${res.status} ${res.statusText}`.trim();
   try {
@@ -75,8 +71,6 @@ function shouldFallback(err) {
   if (status === 400) return /model/i.test(err.message) && /not found|not supported|unsupported|invalid/i.test(err.message);
   return true;
 }
-
-/* ---------- Model catalogs ---------- */
 
 export async function fetchGeminiModels(apiKey, signal) {
   const models = [];
@@ -143,8 +137,6 @@ export function orderOpenRouterModels(models) {
     .sort((a, b) => Number(b.free) - Number(a.free) || a.label.localeCompare(b.label));
 }
 
-/* ---------- Server-sent events ---------- */
-
 async function* sseData(res) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -172,8 +164,6 @@ async function* sseData(res) {
   }
 }
 
-/* ---------- Timeout Helper ---------- */
-// Ensures that if a provider hangs (e.g. dead model), we abort and fall back quickly.
 function fetchWithTimeout(resource, options = {}) {
   const { timeout = 25000 } = options;
   const controller = new AbortController();
@@ -185,8 +175,6 @@ function fetchWithTimeout(resource, options = {}) {
 
   return fetch(resource, { ...options, signal: combinedSignal }).finally(() => clearTimeout(id));
 }
-
-/* ---------- Gemini ---------- */
 
 function fileAsText(f) {
   const text = String(f.text ?? '');
@@ -216,13 +204,14 @@ function toGeminiContents(messages) {
   return contents;
 }
 
-async function* streamGemini({ model, apiKey, messages, system, signal }) {
+async function* streamGemini({ model, apiKey, messages, system, signal, webSearch }) {
   let includeThoughts = true;
   let res;
   for (;;) {
     const body = { contents: toGeminiContents(messages) };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     if (includeThoughts) body.generationConfig = { thinkingConfig: { includeThoughts: true } };
+    
     if (webSearch) {
       body.tools = [{ googleSearch: {} }];
     }
@@ -286,8 +275,6 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
   yield { type: 'done', finishReason };
 }
 
-/* ---------- OpenRouter ---------- */
-
 const AUDIO_FORMATS = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3' };
 
 function toOpenRouterMessages(messages, system) {
@@ -319,6 +306,8 @@ function toOpenRouterMessages(messages, system) {
 async function* streamOpenRouter({ model, apiKey, messages, system, signal, webSearch }) {
   const { messages: body, skipped } = toOpenRouterMessages(messages, system);
   if (skipped.length) yield { type: 'notice', message: `OpenRouter skipped files it can't read: ${skipped.join(', ')}` };
+
+  const payload = { model, messages: body, stream: true };
   if (webSearch) {
     payload.plugins = [{ id: "web" }];
   }
@@ -331,7 +320,7 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal, webS
       'HTTP-Referer': globalThis.location?.origin || 'https://localhost',
       'X-Title': 'Gemini Mobile Studio',
     },
-    body: JSON.stringify({ model, messages: body, stream: true }),
+    body: JSON.stringify(payload),
     signal,
   });
   if (!res.ok) throw await httpError(res);
@@ -392,8 +381,6 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal, webS
 
 const RUNNERS = { gemini: streamGemini, openrouter: streamOpenRouter };
 
-/* ---------- The engine ---------- */
-
 const idsOf = (provider) => {
   const list = getCatalog(provider);
   return (list.length ? list : provider === 'gemini' ? GEMINI_DEFAULTS : []).map((m) => m.id);
@@ -451,9 +438,8 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
       }
       return;
     } catch (err) {
-      if (signal?.aborted) return; // User explicitly pressed Stop
+      if (signal?.aborted) return; 
       
-      // If it was an internal timeout (AbortError), we treat it as a normal failure to trigger fallback
       lastError = err.name === 'AbortError' ? new Error('Model took too long to respond.') : err;
       
       if (produced) throw lastError;
@@ -464,8 +450,6 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
   }
   throw lastError ?? new Error('No model is available.');
 }
-
-/* ---------- Background helpers ---------- */
 
 export function pickHelperModel(keys, selected) {
   if (keys.gemini) {

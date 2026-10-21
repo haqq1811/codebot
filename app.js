@@ -2,14 +2,14 @@ import { keyStore, memoryStore, loadCatalogCache, saveCatalogCache, removeCatalo
 import {
   streamChat, fetchOpenRouterModels, fetchGeminiModels, setCatalog, getCatalog,
   orderOpenRouterModels, orderGeminiModels, parseModelValue, modelValue,
-  GEMINI_DEFAULTS, DEFAULT_SYSTEM_PROMPT, PROVIDER_NAMES, pricingTag,
+  DEFAULT_SYSTEM_PROMPT, PROVIDER_NAMES, pricingTag,
   completeOnce, pickHelperModel,
 } from './engine.js';
 import { prepareRequest, maintain, mergeNotes } from './memory.js';
 
 const STORAGE = { model: 'GEMINI_MODEL', sidebar: 'GEMINI_SIDEBAR_OPEN' };
 const DB_NAME = 'ChatHistoryDB';
-const DB_VERSION = 2; // Upgraded to separate attachments
+const DB_VERSION = 2;
 const STORE_SESSIONS = 'sessions';
 const STORE_ATTACHMENTS = 'attachments';
 
@@ -54,9 +54,8 @@ const state = {
 };
 
 let nextAttachmentId = 0, stickToBottom = true, toastTimer = 0, lastFocus = null;
-let ctxTargetIndex = -1; // For long press menu
+let ctxTargetIndex = -1; 
 
-/* ---------- Helpers ---------- */
 const SVG_NS = 'http://www.w3.org/2000/svg';
 function newId() { return Date.now().toString(); }
 const store = {
@@ -105,7 +104,6 @@ function makeThrottle(fn, wait) {
 }
 const modelIds = () => [...els.modelSelect.options].map((o) => o.value);
 
-/* ---------- Catalog & Model Dropdown ---------- */
 const CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 async function refreshCatalogs({ force = false } = {}) {
   const keys = keyStore.all(), cached = loadCatalogCache(), errors = {}, jobs = [];
@@ -131,16 +129,23 @@ async function refreshCatalogs({ force = false } = {}) {
 
 function renderModelDropdown() {
   const select = els.modelSelect, keys = keyStore.all(), cached = loadCatalogCache();
-  const pick = (p, f) => getCatalog(p).length ? getCatalog(p) : cached[p]?.models?.length ? cached[p].models : f;
+  
+  // Only use the live catalog or the saved cache. No more hardcoded fallbacks.
+  const pick = (p) => getCatalog(p).length ? getCatalog(p) : (cached[p]?.models ?? []);
+  
   const groups = [
-    { provider: 'gemini', label: 'Google AI Studio', models: pick('gemini', GEMINI_DEFAULTS) },
-    { provider: 'openrouter', label: 'OpenRouter', models: pick('openrouter', []) },
+    { provider: 'gemini', label: 'Google AI Studio', models: pick('gemini') },
+    { provider: 'openrouter', label: 'OpenRouter', models: pick('openrouter') },
   ];
   groups.sort((a, b) => Number(Boolean(keys[b.provider])) - Number(Boolean(keys[a.provider])));
 
   select.replaceChildren();
+  
+  let totalModels = 0;
   for (const { provider, label, models } of groups) {
     if (!models.length) continue;
+    totalModels += models.length;
+    
     const group = el('optgroup'); group.label = label;
     for (const m of models) {
       const opt = el('option', '', `${m.label || m.id}${pricingTag(provider, m)}`);
@@ -148,12 +153,21 @@ function renderModelDropdown() {
     }
     select.append(group);
   }
+
+  // If we have absolutely no models (e.g., no key, offline, first load)
+  if (totalModels === 0) {
+    const placeholder = el('option', '', keys.gemini || keys.openrouter ? 'Loading models...' : 'Add API Key to load models');
+    placeholder.disabled = true;
+    placeholder.selected = true;
+    select.append(placeholder);
+    return;
+  }
+
   const saved = store.get(STORAGE.model), ids = modelIds();
-  const wanted = saved && [saved, modelValue('gemini', saved)].find((v) => ids.includes(v));
-  if (wanted) select.value = wanted;
+  const wanted = saved && ids.includes(saved);
+  if (wanted) select.value = saved;
 }
 
-/* ---------- API keys ---------- */
 const keyInputs = { gemini: els.apiKeyInput, openrouter: $('openrouter-key-input') };
 function openKeyModal() {
   lastFocus = document.activeElement; const keys = keyStore.all();
@@ -184,7 +198,6 @@ function syncEmptyState() {
   els.emptyKeyBtn.hidden = Boolean(keys.gemini || keys.openrouter);
 }
 
-/* ---------- Attachments ---------- */
 const mimeFor = (file) => file.type || MIME_BY_EXT[getExt(file.name)] || 'application/octet-stream';
 const isTextFile = (file) => file.type.startsWith('text/') || /json|xml|javascript|yaml|x-sh/.test(file.type) || TEXT_EXTENSIONS.has(getExt(file.name));
 function fileKind(file) {
@@ -244,7 +257,7 @@ function thumbMedia({ thumb = null, kind = 'file', ext = 'FILE' }) {
     const img = el('img'); img.src = thumb; img.alt = ''; img.draggable = false; media.append(img);
     if (kind === 'video') media.append(el('span', 'thumb-badge')); if (kind === 'video') media.lastChild.append(icon('play'));
   } else {
-    media.classList.add('is-tile'); media.append(icon(KIND_ICON[kind] ?? 'file'), el('span', 'thumb-ext', ext));
+  	media.classList.add('is-tile'); media.append(icon(KIND_ICON[kind] ?? 'file'), el('span', 'thumb-ext', ext));
   }
   return media;
 }
@@ -312,7 +325,6 @@ async function waitForAttachments() {
   if (state.attachments.some((a) => a.loading)) { toast('Some files are still loading.', 4000); return false; } return true;
 }
 
-/* ---------- Rendering ---------- */
 function renderMarkdown(markdown) {
   const canRender = typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined';
   if (!canRender) return `<p style="white-space:pre-wrap">${escapeHTML(markdown)}</p>`;
@@ -349,8 +361,6 @@ function createMessage(role) {
 }
 function scrollToBottom(force = false) { if (force) stickToBottom = true; if (stickToBottom) els.chatBox.scrollTop = els.chatBox.scrollHeight; }
 function clearTranscript() { els.chatBox.querySelectorAll('.msg').forEach((n) => n.remove()); syncEmptyState(); }
-
-// [Replace attachMessageActions]
 function attachMessageActions(msgNode, content, index, isUser = false) {
   const actionBar = el('div', 'msg-actions');
   
@@ -388,21 +398,15 @@ function renderUserMessage({ text = '', files = [] }, index) {
   }
   if (text) msg.append(document.createTextNode(text));
   
-  // Long press logic
   let pressTimer;
   msg.addEventListener('pointerdown', (e) => {
-    if (e.pointerType === 'mouse') return; // mouse uses right click
-    pressTimer = setTimeout(() => {
-      showContextMenu(e.clientX, e.clientY, text, index);
-    }, 500);
+    if (e.pointerType === 'mouse') return;
+    pressTimer = setTimeout(() => showContextMenu(e.clientX, e.clientY, text, index), 500);
   });
   msg.addEventListener('pointerup', () => clearTimeout(pressTimer));
   msg.addEventListener('pointermove', () => clearTimeout(pressTimer));
   msg.addEventListener('pointercancel', () => clearTimeout(pressTimer));
-  msg.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showContextMenu(e.clientX, e.clientY, text, index);
-  });
+  msg.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, text, index); });
 
   return msg;
 }
@@ -449,12 +453,10 @@ function renderAssistant(msg, data, { final = false, note = '', index = -1 } = {
   const caption = [label, formatStats(stats)].filter(Boolean).join('\n');
   parts.meta.hidden = !(final && caption); parts.meta.textContent = caption;
 
-  // Add actions if final and we don't already have them
   if (final && text && !msg.querySelector('.msg-actions') && index !== -1) {
     attachMessageActions(msg, text, index);
   }
 }
-
 function formatDuration(ms) { const s = ms / 1000; if (s < 10) return `${s.toFixed(1)}s`; if (s < 60) return `${Math.round(s)}s`; return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`; }
 const formatTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 function formatStats(stats) {
@@ -476,34 +478,27 @@ function renderTranscript() {
   scrollToBottom(true);
 }
 
-/* ---------- Context Menu (User Long Press) ---------- */
 function showContextMenu(x, y, text, index) {
   els.ctxMenu.hidden = false;
   els.ctxMenu.style.left = `${Math.min(x, window.innerWidth - 140)}px`;
   els.ctxMenu.style.top = `${Math.min(y, window.innerHeight - 100)}px`;
   ctxTargetIndex = index;
 
-  // Clean up previous listeners
   const newCtxCopy = els.ctxCopy.cloneNode(true);
   const newCtxRetry = els.ctxRetry.cloneNode(true);
   els.ctxCopy.replaceWith(newCtxCopy); els.ctxRetry.replaceWith(newCtxRetry);
   els.ctxCopy = newCtxCopy; els.ctxRetry = newCtxRetry;
 
   els.ctxCopy.addEventListener('click', async () => {
-    els.ctxMenu.hidden = true;
-    const ok = await copyText(text);
-    toast(ok ? 'Copied.' : 'Copy failed.');
+    els.ctxMenu.hidden = true; const ok = await copyText(text); toast(ok ? 'Copied.' : 'Copy failed.');
   });
   els.ctxRetry.addEventListener('click', () => {
-    els.ctxMenu.hidden = true;
-    retryFrom(ctxTargetIndex);
+    els.ctxMenu.hidden = true; retryFrom(ctxTargetIndex);
   });
 }
 document.addEventListener('pointerdown', (e) => {
   if (!els.ctxMenu.hidden && !els.ctxMenu.contains(e.target)) els.ctxMenu.hidden = true;
 });
-
-/* ---------- Generation ---------- */
 function setBusy(busy) {
   state.generating = busy; els.sendBtn.classList.toggle('is-stop', busy); els.sendBtn.setAttribute('aria-label', busy ? 'Stop' : 'Send');
   els.sendBtn.replaceChildren(icon(busy ? 'stop' : 'send'));
@@ -540,25 +535,20 @@ async function sendMessage() {
   await runTurn({ message, ui });
 }
 
-// [Replace retryFrom]
 async function retryFrom(targetIndex) {
   if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
   if (!navigator.onLine) { toast("You're offline."); return; }
 
-  // Find the user message corresponding to this index
   let userIndex = targetIndex;
   while (userIndex >= 0 && state.history[userIndex].role !== 'user') userIndex--;
   if (userIndex < 0) return;
 
-  // Deep copy the messages we want to keep
   const targetMsg = JSON.parse(JSON.stringify(state.history[userIndex]));
   const targetUi = JSON.parse(JSON.stringify(state.ui[userIndex]));
 
-  // Slice history and UI to remove everything from this message onwards
   state.history = state.history.slice(0, userIndex);
   state.ui = state.ui.slice(0, userIndex);
   
-  // Reset memory cursor if we are going back far
   if (state.summarizedCount > userIndex) { 
     state.summarizedCount = userIndex; 
     state.summary = ''; 
@@ -566,28 +556,17 @@ async function retryFrom(targetIndex) {
   }
   
   renderTranscript();
-  
-  // Re-send the exact same message turn
   await runTurn({ message: targetMsg, ui: targetUi });
 }
 
-// [Replace runTurn]
 async function runTurn(turn) {
-  state.abort = new AbortController(); const { signal } = state.abort; setBusy(true);
+  state.abort = new AbortController(); 
+  const { signal } = state.abort; 
+  setBusy(true);
 
-  // Calculate index BEFORE pushing
   const msgIndex = state.history.length; 
   state.history.push(turn.message);
   state.ui.push(turn.ui);
-  
-  const stream = streamChat({ 
-      messages: request.messages, 
-      system: request.system, 
-      selected, 
-      keys: keyStore.all(), 
-      signal, 
-      webSearch: state.webSearch // <-- Add this
-    });
 
   const selected = parseModelValue(els.modelSelect.value);
   const used = { provider: selected.provider, model: selected.id };
@@ -608,7 +587,15 @@ async function runTurn(turn) {
     });
     if (request.dropped > 0) toast(`${request.dropped} older message(s) left out of this request.`, 5000);
 
-    const stream = streamChat({ messages: request.messages, system: request.system, selected, keys: keyStore.all(), signal });
+    const stream = streamChat({ 
+      messages: request.messages, 
+      system: request.system, 
+      selected, 
+      keys: keyStore.all(), 
+      signal, 
+      webSearch: state.webSearch 
+    });
+
     for await (const chunk of stream) {
       if (chunk.type === 'status') {
         used.provider = chunk.provider; used.model = chunk.model; result.model = chunk.model;
@@ -633,7 +620,6 @@ async function runTurn(turn) {
     state.history.push({ role: 'assistant', content: result.text, thoughts: result.thoughts, model: result.model, provider: used.provider });
     state.ui.push({ role: 'ai', text: result.text, thoughts: result.thoughts, model: result.model, stats: result.stats });
 
-    // Pass msgIndex (which is the user message index) to renderAssistant
     renderAssistant(bubble, result, { final: true, note: stopped ? 'stopped' : failure ? 'interrupted' : '', index: msgIndex });
     if (failure && !stopped) { console.warn(failure); toast(describeError(failure).message, 5000); }
     scrollToBottom(); saveCurrentSession();
@@ -651,10 +637,9 @@ function showError(bubble, turn, msgIndex, err) {
   bubble.replaceChildren(el('div', 'error-text', message));
   delete bubble._parts; delete bubble._lastText; delete bubble._lastThoughts; delete bubble._lastEnhanced;
   if (detail) bubble.append(el('div', 'error-detail', detail));
-  attachMessageActions(bubble, '', msgIndex, false); // Will only add Retry really, but Copy/Share on error is harmless
+  attachMessageActions(bubble, '', msgIndex, false); 
   scrollToBottom();
 }
-
 function errInfo(err) {
   let message = err?.message ?? String(err ?? 'Unknown error'), status = err?.status ?? err?.code ?? null;
   try { const body = JSON.parse(message); if (body?.error) { message = body.error.message || message; status = body.error.code || status; } } catch {}
@@ -671,7 +656,6 @@ function describeError(err) {
   return friendly ? { message: friendly, detail: message === friendly ? '' : message } : { message, detail: '' };
 }
 
-/* ---------- Database (Sessions + Attachments) ---------- */
 const dbPromise = new Promise((resolve) => {
   if (!('indexedDB' in window)) { resolve(null); return; }
   const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -724,12 +708,10 @@ function updateHistoryItemInPlace() {
 async function saveCurrentSession() {
   if (!state.history.length) return;
   try {
-    // Strip heavy data and save to attachments store
     const cleanHistory = JSON.parse(JSON.stringify(state.history));
     const cleanUi = JSON.parse(JSON.stringify(state.ui));
     const attachmentsToSave = [];
 
-    // Clean history (data/text)
     for (const msg of cleanHistory) {
       for (const f of msg.files ?? []) {
         if (f.data || f.text) {
@@ -739,7 +721,6 @@ async function saveCurrentSession() {
         }
       }
     }
-    // Clean ui (thumbs)
     for (const msg of cleanUi) {
       for (const f of msg.files ?? []) {
         if (f.thumb) {
@@ -791,7 +772,6 @@ async function loadSession(id) {
   try { session = await dbGetSession(id); } catch (err) { console.warn(err); }
   if (!session) { toast('Chat could not be opened.'); return; }
 
-  // Hydrate attachments
   for (const msg of session.messages ?? []) {
     for (const f of msg.files ?? []) {
       if (f.attachmentId) { const att = await dbGetAttachment(f.attachmentId); if (att) { f.data = att.data; f.text = att.text; f.mime = att.mime || f.mime; } }
@@ -832,7 +812,6 @@ async function clearChat() {
   renderHistoryList();
 }
 
-/* ---------- Sidebar ---------- */
 const desktopMQ = window.matchMedia('(min-width: 900px)');
 function isSidebarOpen() {
   return desktopMQ.matches ? !document.body.classList.contains('sidebar-collapsed') : els.sidebar.classList.contains('open');
@@ -848,7 +827,6 @@ function syncSidebarToViewport() {
   els.menuBtn.setAttribute('aria-expanded', String(isSidebarOpen()));
 }
 
-/* ---------- Init & Event wiring ---------- */
 function autoGrow() { els.userInput.style.height = 'auto'; els.userInput.style.height = `${Math.min(els.userInput.scrollHeight, 200)}px`; }
 
 function trackViewport() {
@@ -867,7 +845,6 @@ function wireDragAndDrop() {
   window.addEventListener('dragleave', (e) => { if (hasFiles(e) && --depth <= 0) reset(); });
   window.addEventListener('drop', (e) => { if (!hasFiles(e)) return; e.preventDefault(); reset(); addFiles(e.dataTransfer.files); });
 }
-
 async function runMemoryUpkeep() {
   if (state.memoryBusy) { state.memoryRerun = true; return; }
   state.memoryBusy = true;
@@ -930,7 +907,6 @@ function wireMemoryModal() {
   memoryEls.addBtn.addEventListener('click', addMemoryNote); memoryEls.addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addMemoryNote(); });
   memoryEls.clearBtn.addEventListener('click', () => { if (!confirm('Delete all memory notes?')) return; memoryStore.save({ ...memoryStore.load(), notes: [] }); renderMemoryModal(); });
 }
-
 const offlineBanner = $('offline-banner');
 function syncOnline() { if (offlineBanner) offlineBanner.hidden = navigator.onLine; }
 
@@ -950,6 +926,12 @@ function init() {
     if (e.ctrlKey || e.metaKey || (!e.shiftKey && !touch)) { e.preventDefault(); sendMessage(); }
   });
   els.userInput.addEventListener('paste', (e) => { const files = e.clipboardData?.files; if (files?.length && !e.clipboardData.getData('text/plain')) { e.preventDefault(); addFiles(files); } });
+
+  els.searchBtn.addEventListener('click', () => {
+    state.webSearch = !state.webSearch;
+    els.searchBtn.classList.toggle('active', state.webSearch);
+    toast(state.webSearch ? 'Web search enabled.' : 'Web search disabled.');
+  });
 
   els.attachBtn.addEventListener('click', () => els.fileInput.click());
   els.fileInput.addEventListener('change', () => { addFiles(els.fileInput.files); els.fileInput.value = ''; });
@@ -982,12 +964,6 @@ function init() {
 }
 
 init();
-
- els.searchBtn.addEventListener('click', () => {
-    state.webSearch = !state.webSearch;
-    els.searchBtn.classList.toggle('active', state.webSearch);
-    toast(state.webSearch ? 'Web search enabled.' : 'Web search disabled.');
-  });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
