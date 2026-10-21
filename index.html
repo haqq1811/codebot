@@ -26,6 +26,7 @@
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
     <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
     <symbol id="i-clip" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
@@ -109,6 +110,9 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>
               </button>
               <input type="file" id="file-input" multiple hidden>
+              <button id="search-btn" class="composer-icon-btn" type="button" title="Search the web" aria-label="Search the web">
+               <svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>
+              </button>
               
               <div class="model-select-wrapper">
                 <select id="model-select" class="modern-select" aria-label="Model">

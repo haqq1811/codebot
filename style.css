@@ -161,34 +161,29 @@ header {
 .msg-thumb { flex: none; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; background: rgba(255,255,255,.16); }
 
 /* Action Buttons (Copy, Share, Retry) */
-/* Update the Action Buttons to be icon-only, borderless, and closer together */
 .msg-actions {
   display: flex;
-  gap: 4px; /* Tight spacing */
+  gap: 12px;
   margin-top: 12px;
   margin-bottom: 4px;
 }
 .msg-actions button {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
+  gap: 6px;
+  padding: 6px 10px;
   background: transparent;
   color: var(--text-faint);
-  border: none; /* Removed border */
-  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.8rem;
   transition: all 0.2s;
 }
 .msg-actions button:hover {
   background: var(--surface-hover);
   color: var(--text-strong);
 }
-.msg-actions button .icon {
-  width: 18px;
-  height: 18px;
-}
+.msg-actions button .icon { width: 14px; height: 14px; }
 
 .msg-meta { margin-top: 8px; font-size: .75rem; color: var(--text-faint); white-space: pre-line; }
 
@@ -488,3 +483,8 @@ body.dragging #main::after { content: "Drop files to attach"; position: absolute
 .memory-status { font-size: .8rem; color: var(--text-faint); }
 .key-label { margin-top: 4px; font-size: .8rem; font-weight: 600; color: var(--text-dim); }
 .key-label a { font-weight: 400; }
+
+.composer-icon-btn.active {
+  background: rgba(77, 171, 247, 0.15); /* Soft blue background */
+  color: var(--accent); /* Blue icon */
+}

@@ -36,6 +36,7 @@ const MIME_BY_EXT = {
 const $ = (id) => document.getElementById(id);
 const els = {
   chatBox: $('chat-box'), emptyState: $('empty-state'), emptyKeyBtn: $('empty-key-btn'),
+  searchBtn: $('search-btn'),
   userInput: $('user-input'), sendBtn: $('send-btn'), attachBtn: $('attach-btn'), fileInput: $('file-input'),
   filePreviewBar: $('file-preview-bar'), thumbStrip: $('thumb-strip'), fileNameDisplay: $('file-name-display'), removeFileBtn: $('remove-file-btn'),
   modelSelect: $('model-select'), clearChatBtn: $('clear-chat-btn'), keyBtn: $('key-btn'),
@@ -47,6 +48,7 @@ const els = {
 };
 const state = {
   history: [], ui: [], attachments: [], pendingReads: new Set(),
+  webSearch: false,
   sessionId: newId(), generating: false, abort: null,
   summary: '', summarizedCount: 0, notesCursor: 0, memoryBusy: false, memoryRerun: false,
 };
@@ -577,6 +579,15 @@ async function runTurn(turn) {
   const msgIndex = state.history.length; 
   state.history.push(turn.message);
   state.ui.push(turn.ui);
+  
+  const stream = streamChat({ 
+      messages: request.messages, 
+      system: request.system, 
+      selected, 
+      keys: keyStore.all(), 
+      signal, 
+      webSearch: state.webSearch // <-- Add this
+    });
 
   const selected = parseModelValue(els.modelSelect.value);
   const used = { provider: selected.provider, model: selected.id };
@@ -971,6 +982,12 @@ function init() {
 }
 
 init();
+
+ els.searchBtn.addEventListener('click', () => {
+    state.webSearch = !state.webSearch;
+    els.searchBtn.classList.toggle('active', state.webSearch);
+    toast(state.webSearch ? 'Web search enabled.' : 'Web search disabled.');
+  });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {

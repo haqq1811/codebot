@@ -223,6 +223,9 @@ async function* streamGemini({ model, apiKey, messages, system, signal }) {
     const body = { contents: toGeminiContents(messages) };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     if (includeThoughts) body.generationConfig = { thinkingConfig: { includeThoughts: true } };
+    if (webSearch) {
+      body.tools = [{ googleSearch: {} }];
+    }
 
     res = await fetchWithTimeout(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
       method: 'POST',
@@ -313,9 +316,12 @@ function toOpenRouterMessages(messages, system) {
   return { messages: out, skipped: [...new Set(skipped)] };
 }
 
-async function* streamOpenRouter({ model, apiKey, messages, system, signal }) {
+async function* streamOpenRouter({ model, apiKey, messages, system, signal, webSearch }) {
   const { messages: body, skipped } = toOpenRouterMessages(messages, system);
   if (skipped.length) yield { type: 'notice', message: `OpenRouter skipped files it can't read: ${skipped.join(', ')}` };
+  if (webSearch) {
+    payload.plugins = [{ id: "web" }];
+  }
 
   const res = await fetchWithTimeout(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
@@ -418,7 +424,7 @@ function buildAttempts(selected, keys) {
   return attempts;
 }
 
-export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, selected, keys, signal }) {
+export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, selected, keys, signal, webSearch }) {
   if (!selected?.id) throw Object.assign(new Error('No model is selected.'), { fatal: true });
   if (!keys?.[selected.provider]) {
     throw Object.assign(
@@ -437,7 +443,7 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
     let produced = false;
     try {
       const run = RUNNERS[target.provider]({
-        model: target.model, apiKey: keys[target.provider], messages, system, signal,
+        model: target.model, apiKey: keys[target.provider], messages, system, signal, webSearch
       });
       for await (const chunk of run) {
         if (chunk.type === 'text' || chunk.type === 'thought') produced = true;
