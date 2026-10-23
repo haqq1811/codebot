@@ -746,8 +746,12 @@ function updateHistoryItemInPlace() {
 }
 
 const persistedAttachments = new Set();
+let saveChain = Promise.resolve();
 async function saveCurrentSession() {
   if (!state.history.length) return;
+  // Snapshot everything NOW. The writes below are async, and state can switch to another chat meanwhile.
+  const snapId = state.sessionId, snapSummary = state.summary;
+  const snapCount = state.summarizedCount, snapCursor = state.notesCursor;
   try {
     const cleanHistory = JSON.parse(JSON.stringify(state.history));
     const cleanUi = JSON.parse(JSON.stringify(state.ui));
@@ -771,14 +775,19 @@ async function saveCurrentSession() {
       delete c.thumb;
     }));
 
-    for (const att of attachmentsToSave) { await dbPutAttachment(att); persistedAttachments.add(att.id); }
-    await dbPutSession({
-      id: state.sessionId, title: makeTitle(state.ui),
-      messages: cleanHistory, ui: cleanUi,
-      summary: state.summary, summarizedCount: state.summarizedCount, notesCursor: state.notesCursor,
-      timestamp: Date.now(),
+    const title = makeTitle(cleanUi);
+    // Saves run one at a time so an older snapshot can never land after a newer one.
+    const job = saveChain.then(async () => {
+      for (const att of attachmentsToSave) { await dbPutAttachment(att); persistedAttachments.add(att.id); }
+      await dbPutSession({
+        id: snapId, title, messages: cleanHistory, ui: cleanUi,
+        summary: snapSummary, summarizedCount: snapCount, notesCursor: snapCursor,
+        timestamp: Date.now(),
+      });
     });
-    updateHistoryItemInPlace();
+    saveChain = job.catch(() => {});
+    await job;
+    if (state.sessionId === snapId) updateHistoryItemInPlace(); else renderHistoryList();
   } catch (err) { console.warn('Could not save session:', err); toast('Could not save chat. Storage may be full.'); }
 }
 
@@ -837,6 +846,7 @@ async function loadSession(id) {
 
 async function deleteSession(id) {
   if (busyGuard()) return; if (!confirm('Delete this chat?')) return;
+  await saveChain; // let any pending save land first so it can't re-create the chat after deletion
   try { await dbDeleteSession(id); } catch (err) { console.warn(err); }
   if (id === state.sessionId) resetConversation();
   renderHistoryList();
@@ -848,6 +858,7 @@ function startNewChat() {
 async function clearChat() {
   if (busyGuard()) return; if (state.history.length && !confirm('Clear this conversation?')) return;
   const id = state.sessionId; resetConversation();
+  await saveChain;
   try { await dbDeleteSession(id); } catch (err) { console.warn(err); }
   renderHistoryList();
 }

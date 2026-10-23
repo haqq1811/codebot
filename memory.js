@@ -19,8 +19,8 @@ export const SUMMARY_SYSTEM =
 
 export const NOTES_SYSTEM =
   'You extract lasting facts about the USER from a conversation, to help in future, unrelated conversations. ' +
-  'Include stable things: preferences, background, skills, ongoing projects, tools and setup, goals, and how they like answers written. ' +
-  'Rules: only what the user said or clearly showed; never guess; skip one-off questions and the details of a single task; ' +
+  'Include only stable things that will still be true next month: preferences, background, skills, ongoing projects, tools and setup, goals, and how they like answers written. ' +
+  'Rules: only what the user said or clearly showed; never guess; skip one-off questions, what the conversation is currently about, shows/books/products they asked about, and the details of a single task; ' +
   'never include secrets (passwords, API keys, ID or account numbers) or sensitive personal details. ' +
   'Write each fact as one short line starting with "- ". Do not repeat facts already in the existing notes. ' +
   'If there is nothing new, output exactly NONE.';
@@ -37,8 +37,9 @@ export function composeSystem(base, notes = [], summary = '') {
   const parts = [base];
   if (notes.length) {
     parts.push(
-      'What you know about the user (saved notes; they may be outdated. Use them only when relevant, ' +
-      'and do not mention them unless asked):\n' + notes.map((n) => `- ${n}`).join('\n'),
+      'Background about the user from past chats (may be outdated). Treat every conversation as new: ' +
+      'answer only what the user asks now, never continue or bring up earlier topics, and use these ' +
+      'notes only when the current message clearly needs them. Do not mention them unless asked:\n' + notes.map((n) => `- ${n}`).join('\n'),
     );
   }
   if (summary) {
