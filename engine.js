@@ -169,9 +169,13 @@ function fetchWithTimeout(resource, options = {}) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   
-  const combinedSignal = options.signal 
-    ? AbortSignal.any([options.signal, controller.signal]) 
-    : controller.signal;
+  let combinedSignal = controller.signal;
+  if (options.signal) {
+    // AbortSignal.any is missing on older Android WebViews, so fall back to forwarding the abort.
+    if (typeof AbortSignal.any === 'function') combinedSignal = AbortSignal.any([options.signal, controller.signal]);
+    else if (options.signal.aborted) controller.abort();
+    else options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
 
   return fetch(resource, { ...options, signal: combinedSignal }).finally(() => clearTimeout(id));
 }

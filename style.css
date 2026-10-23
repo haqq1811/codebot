@@ -264,7 +264,7 @@ header {
   margin: 0 auto;
   background: var(--surface-input);
   border: 1px solid var(--border-strong);
-  border-radius: 24px;
+  border-radius: 10px;
   padding: 6px 6px 6px 16px;
   transition: border-color 0.2s;
 }
@@ -325,7 +325,7 @@ header {
   background: var(--surface-hover);
   color: var(--text);
   border: none;
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 6px 28px 6px 12px;
   font-size: 0.85rem;
   font-weight: 500;
@@ -370,7 +370,9 @@ header {
   transition: transform 0.1s;
 }
 .composer-send-btn:hover { transform: scale(1.05); }
-.composer-send-btn.is-stop { background: var(--danger); color: #fff; }
+.composer-send-btn.is-stop { background: #e53935; color: #fff; }
+.composer-send-btn .icon { stroke-width: 2.6; }
+#attach-btn .icon { width: 26px; height: 26px; stroke-width: 1.7; }
 
 /* Context Menu (Long press) */
 .context-menu {
@@ -488,3 +490,10 @@ body.dragging #main::after { content: "Drop files to attach"; position: absolute
   background: rgba(77, 171, 247, 0.15); /* Soft blue background */
   color: var(--accent); /* Blue icon */
 }
+/* Long-press menu: stop the browser's own selection/callout from fighting it */
+.msg.user { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+
+/* Math + SVG drawings */
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; margin: .6em 0; }
+.svg-preview { padding: 40px 14px 14px; text-align: center; overflow-x: auto; background: #fff; }
+.svg-preview svg { max-width: 100%; height: auto; }

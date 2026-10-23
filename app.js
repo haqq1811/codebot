@@ -91,8 +91,10 @@ function toast(message, ms = 3200) {
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch {}
   try {
-    const ta = el('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
-    document.body.append(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok;
+    const ta = el('textarea'); ta.value = text; ta.readOnly = true;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;font-size:16px';
+    document.body.append(ta); ta.focus({ preventScroll: true }); ta.select(); ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
   } catch { return false; }
 }
 function makeThrottle(fn, wait) {
@@ -325,10 +327,26 @@ async function waitForAttachments() {
   if (state.attachments.some((a) => a.loading)) { toast('Some files are still loading.', 4000); return false; } return true;
 }
 
+// Math is pulled out before marked runs (marked mangles \ and _), then rendered with KaTeX.
+const MATH_RE = /(```[\s\S]*?(?:```|$)|`[^`\n]+`)|\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|(?<![\\$\d])\$(?![\s$])([^$\n]+?)(?<![\s\\])\$(?!\d)/g;
 function renderMarkdown(markdown) {
   const canRender = typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined';
   if (!canRender) return `<p style="white-space:pre-wrap">${escapeHTML(markdown)}</p>`;
-  return DOMPurify.sanitize(marked.parse(markdown));
+  const math = [];
+  const source = markdown.replace(MATH_RE, (all, code, d1, d2, i1, i2) => {
+    if (code) return all;
+    math.push({ all, tex: (d1 ?? d2 ?? i1 ?? i2).trim(), display: d1 != null || d2 != null });
+    return `XMATHX${math.length - 1}X`;
+  });
+  let html = DOMPurify.sanitize(marked.parse(source));
+  if (math.length) {
+    html = html.replace(/XMATHX(\d+)X/g, (_, n) => {
+      const m = math[Number(n)]; if (!m) return '';
+      try { if (typeof katex !== 'undefined') return katex.renderToString(m.tex, { displayMode: m.display, throwOnError: false }); } catch {}
+      return escapeHTML(m.all);
+    });
+  }
+  return html;
 }
 if (typeof DOMPurify !== 'undefined') {
   DOMPurify.addHook('afterSanitizeAttributes', (node) => {
@@ -337,6 +355,19 @@ if (typeof DOMPurify !== 'undefined') {
 }
 function highlightCode(code, lang) {
   try { if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) hljs.highlightElement(code); } catch {}
+}
+function addSvgPreview(wrapper, pre, source) {
+  if (typeof DOMPurify === 'undefined') return;
+  const clean = DOMPurify.sanitize(source, { USE_PROFILES: { svg: true, svgFilters: true } });
+  if (!clean.trim()) return;
+  const view = el('div', 'svg-preview'); view.innerHTML = clean;
+  const toggle = el('button', 'copy-btn', 'Code'); toggle.type = 'button'; toggle.style.right = '64px';
+  pre.hidden = true;
+  toggle.addEventListener('click', () => {
+    const showCode = pre.hidden; pre.hidden = !showCode; view.hidden = showCode;
+    toggle.textContent = showCode ? 'Drawing' : 'Code';
+  });
+  wrapper.append(view, toggle);
 }
 function enhanceContent(root) {
   root.querySelectorAll('pre').forEach((pre) => {
@@ -350,6 +381,7 @@ function enhanceContent(root) {
     });
     const wrapper = el('div', 'code-block'); pre.replaceWith(wrapper);
     wrapper.append(el('span', 'code-lang', lang || 'code'), copy, pre);
+    if (code && (lang === 'svg' || (!lang && /^\s*<svg[\s>]/i.test(code.textContent)))) addSvgPreview(wrapper, pre, code.textContent);
   });
   root.querySelectorAll('table').forEach((table) => {
     if (table.parentElement.classList.contains('table-wrap')) return;
@@ -387,6 +419,18 @@ function attachMessageActions(msgNode, content, index, isUser = false) {
   msgNode.append(actionBar);
 }
 
+function enableLongPress(node, text, index) {
+  let timer = 0, sx = 0, sy = 0, fired = false;
+  const cancel = () => { clearTimeout(timer); timer = 0; };
+  node.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse') return;
+    sx = e.clientX; sy = e.clientY; fired = false;
+    timer = setTimeout(() => { fired = true; navigator.vibrate?.(15); showContextMenu(sx, sy, text, index); }, 450);
+  });
+  node.addEventListener('pointermove', (e) => { if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 12) cancel(); });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => node.addEventListener(t, cancel));
+  node.addEventListener('contextmenu', (e) => { e.preventDefault(); if (!fired) showContextMenu(e.clientX, e.clientY, text, index); });
+}
 function renderUserMessage({ text = '', files = [] }, index) {
   const msg = createMessage('user');
   if (files.length) {
@@ -398,16 +442,7 @@ function renderUserMessage({ text = '', files = [] }, index) {
   }
   if (text) msg.append(document.createTextNode(text));
   
-  let pressTimer;
-  msg.addEventListener('pointerdown', (e) => {
-    if (e.pointerType === 'mouse') return;
-    pressTimer = setTimeout(() => showContextMenu(e.clientX, e.clientY, text, index), 500);
-  });
-  msg.addEventListener('pointerup', () => clearTimeout(pressTimer));
-  msg.addEventListener('pointermove', () => clearTimeout(pressTimer));
-  msg.addEventListener('pointercancel', () => clearTimeout(pressTimer));
-  msg.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, text, index); });
-
+  enableLongPress(msg, text, index);
   return msg;
 }
 
@@ -478,23 +513,13 @@ function renderTranscript() {
   scrollToBottom(true);
 }
 
+let ctxText = '';
 function showContextMenu(x, y, text, index) {
+  ctxText = text; ctxTargetIndex = index;
   els.ctxMenu.hidden = false;
-  els.ctxMenu.style.left = `${Math.min(x, window.innerWidth - 140)}px`;
-  els.ctxMenu.style.top = `${Math.min(y, window.innerHeight - 100)}px`;
-  ctxTargetIndex = index;
-
-  const newCtxCopy = els.ctxCopy.cloneNode(true);
-  const newCtxRetry = els.ctxRetry.cloneNode(true);
-  els.ctxCopy.replaceWith(newCtxCopy); els.ctxRetry.replaceWith(newCtxRetry);
-  els.ctxCopy = newCtxCopy; els.ctxRetry = newCtxRetry;
-
-  els.ctxCopy.addEventListener('click', async () => {
-    els.ctxMenu.hidden = true; const ok = await copyText(text); toast(ok ? 'Copied.' : 'Copy failed.');
-  });
-  els.ctxRetry.addEventListener('click', () => {
-    els.ctxMenu.hidden = true; retryFrom(ctxTargetIndex);
-  });
+  const w = els.ctxMenu.offsetWidth || 140, h = els.ctxMenu.offsetHeight || 96;
+  els.ctxMenu.style.left = `${Math.max(8, Math.min(x - w / 2, window.innerWidth - w - 8))}px`;
+  els.ctxMenu.style.top = `${Math.max(8, Math.min(y - h - 24, window.innerHeight - h - 8))}px`;
 }
 document.addEventListener('pointerdown', (e) => {
   if (!els.ctxMenu.hidden && !els.ctxMenu.contains(e.target)) els.ctxMenu.hidden = true;
@@ -527,9 +552,6 @@ async function sendMessage() {
 
   const ui = { role: 'user', text, files: files.map(({ name, size, kind, ext, thumb }) => ({ name, size, kind, ext, thumb })) };
 
-  document.querySelectorAll('.retry-btn').forEach((btn) => btn.remove());
-  const msgIndex = state.ui.length;
-  renderUserMessage(ui, msgIndex); scrollToBottom(true);
 
   els.userInput.value = ''; autoGrow(); clearAttachments();
   await runTurn({ message, ui });
@@ -539,22 +561,19 @@ async function retryFrom(targetIndex) {
   if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
   if (!navigator.onLine) { toast("You're offline."); return; }
 
-  let userIndex = targetIndex;
-  while (userIndex >= 0 && state.history[userIndex].role !== 'user') userIndex--;
+  let userIndex = Math.min(targetIndex, state.history.length - 1);
+  while (userIndex >= 0 && state.history[userIndex]?.role !== 'user') userIndex--;
   if (userIndex < 0) return;
 
   const targetMsg = JSON.parse(JSON.stringify(state.history[userIndex]));
-  const targetUi = JSON.parse(JSON.stringify(state.ui[userIndex]));
+  const targetUi = JSON.parse(JSON.stringify(state.ui[userIndex] ?? { role: 'user', text: targetMsg.content, files: [] }));
 
   state.history = state.history.slice(0, userIndex);
   state.ui = state.ui.slice(0, userIndex);
-  
-  if (state.summarizedCount > userIndex) { 
-    state.summarizedCount = userIndex; 
-    state.summary = ''; 
-    state.notesCursor = Math.min(state.notesCursor, userIndex); 
-  }
-  
+  // The old summary may cover messages that no longer exist, so drop it and let it rebuild.
+  if (state.summarizedCount > 0) { state.summarizedCount = 0; state.summary = ''; }
+  state.notesCursor = Math.min(state.notesCursor, userIndex);
+
   renderTranscript();
   await runTurn({ message: targetMsg, ui: targetUi });
 }
@@ -565,6 +584,7 @@ async function runTurn(turn) {
   setBusy(true);
 
   const msgIndex = state.history.length; 
+  renderUserMessage(turn.ui, msgIndex); // runTurn owns the user bubble so retries show it too
   state.history.push(turn.message);
   state.ui.push(turn.ui);
 
@@ -577,6 +597,17 @@ async function runTurn(turn) {
   const result = { text: '', thoughts: '', model: used.model, finishReason: '', usage: null };
   const t0 = performance.now(); let firstMs = 0, answerMs = 0;
   const paint = makeThrottle(() => { renderAssistant(bubble, result); scrollToBottom(); }, STREAM_PAINT_MS);
+
+  // Once a fallback model actually answers, make it the selected model so later sends start there.
+  let synced = false;
+  const syncModel = () => {
+    if (synced) return; synced = true;
+    const value = modelValue(used.provider, used.model);
+    if (value !== els.modelSelect.value && modelIds().includes(value)) {
+      els.modelSelect.value = value; store.set(STORAGE.model, value);
+      toast(`Now using ${used.model}`, 3000);
+    }
+  };
 
   let failure = null;
   try {
@@ -602,9 +633,9 @@ async function runTurn(turn) {
         if (!result.text && !result.thoughts) setThinking(bubble, chunk.model);
       } else if (chunk.type === 'text') {
         if (!firstMs) firstMs = performance.now() - t0; if (!answerMs) answerMs = performance.now() - t0;
-        result.text += chunk.delta; paint();
+        syncModel(); result.text += chunk.delta; paint();
       } else if (chunk.type === 'thought') {
-        if (!firstMs) firstMs = performance.now() - t0; result.thoughts += chunk.delta; paint();
+        if (!firstMs) firstMs = performance.now() - t0; syncModel(); result.thoughts += chunk.delta; paint();
       } else if (chunk.type === 'usage') result.usage = chunk;
       else if (chunk.type === 'fallback') toast(`Switched from ${chunk.from.model} to ${chunk.to.model}`, 4500);
       else if (chunk.type === 'notice') toast(chunk.message, 4000);
@@ -637,8 +668,17 @@ function showError(bubble, turn, msgIndex, err) {
   bubble.replaceChildren(el('div', 'error-text', message));
   delete bubble._parts; delete bubble._lastText; delete bubble._lastThoughts; delete bubble._lastEnhanced;
   if (detail) bubble.append(el('div', 'error-detail', detail));
-  attachMessageActions(bubble, '', msgIndex, false); 
-  scrollToBottom();
+  const bar = el('div', 'msg-actions'), btn = el('button'); btn.type = 'button';
+  btn.append(icon('refresh'), document.createTextNode('Retry'));
+  btn.addEventListener('click', () => {
+    if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
+    if (!navigator.onLine) { toast("You're offline."); return; }
+    if (bubble.nextElementSibling) { toast('Only the latest failed message can be retried.'); return; }
+    const prev = bubble.previousElementSibling;
+    bubble.remove(); if (prev?.classList.contains('user')) prev.remove();
+    runTurn(turn);
+  });
+  bar.append(btn); bubble.append(bar); scrollToBottom();
 }
 function errInfo(err) {
   let message = err?.message ?? String(err ?? 'Unknown error'), status = err?.status ?? err?.code ?? null;
@@ -705,33 +745,33 @@ function updateHistoryItemInPlace() {
   existing.classList.add('active');
 }
 
+const persistedAttachments = new Set();
 async function saveCurrentSession() {
   if (!state.history.length) return;
   try {
     const cleanHistory = JSON.parse(JSON.stringify(state.history));
     const cleanUi = JSON.parse(JSON.stringify(state.ui));
     const attachmentsToSave = [];
+    // Ids live on the in-memory objects, so re-saving a chat reuses rows instead of piling up copies.
+    const stash = (live, clean, idKey, payload, prefix) => {
+      if (!live[idKey]) live[idKey] = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      clean[idKey] = live[idKey];
+      if (!persistedAttachments.has(live[idKey])) attachmentsToSave.push({ id: live[idKey], ...payload });
+    };
+    state.history.forEach((msg, i) => (msg.files ?? []).forEach((f, j) => {
+      if (!(f.data || f.text)) return;
+      const c = cleanHistory[i].files[j];
+      stash(f, c, 'attachmentId', { data: f.data, text: f.text, mime: f.mime }, 'att');
+      delete c.data; delete c.text;
+    }));
+    state.ui.forEach((msg, i) => (msg.files ?? []).forEach((f, j) => {
+      if (!f.thumb) return;
+      const c = cleanUi[i].files[j];
+      stash(f, c, 'thumbId', { thumb: f.thumb }, 'thumb');
+      delete c.thumb;
+    }));
 
-    for (const msg of cleanHistory) {
-      for (const f of msg.files ?? []) {
-        if (f.data || f.text) {
-          const id = `att_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-          attachmentsToSave.push({ id, data: f.data, text: f.text, mime: f.mime });
-          f.attachmentId = id; delete f.data; delete f.text;
-        }
-      }
-    }
-    for (const msg of cleanUi) {
-      for (const f of msg.files ?? []) {
-        if (f.thumb) {
-          const id = `thumb_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-          attachmentsToSave.push({ id, thumb: f.thumb });
-          f.thumbId = id; delete f.thumb;
-        }
-      }
-    }
-
-    for (const att of attachmentsToSave) await dbPutAttachment(att);
+    for (const att of attachmentsToSave) { await dbPutAttachment(att); persistedAttachments.add(att.id); }
     await dbPutSession({
       id: state.sessionId, title: makeTitle(state.ui),
       messages: cleanHistory, ui: cleanUi,
@@ -774,12 +814,12 @@ async function loadSession(id) {
 
   for (const msg of session.messages ?? []) {
     for (const f of msg.files ?? []) {
-      if (f.attachmentId) { const att = await dbGetAttachment(f.attachmentId); if (att) { f.data = att.data; f.text = att.text; f.mime = att.mime || f.mime; } }
+      if (f.attachmentId) { const att = await dbGetAttachment(f.attachmentId); if (att) { f.data = att.data; f.text = att.text; f.mime = att.mime || f.mime; persistedAttachments.add(f.attachmentId); } }
     }
   }
   for (const msg of session.ui ?? []) {
     for (const f of msg.files ?? []) {
-      if (f.thumbId) { const att = await dbGetAttachment(f.thumbId); if (att) f.thumb = att.thumb; }
+      if (f.thumbId) { const att = await dbGetAttachment(f.thumbId); if (att) { f.thumb = att.thumb; persistedAttachments.add(f.thumbId); } }
     }
   }
 
@@ -917,6 +957,8 @@ function init() {
   window.addEventListener('online', () => { syncOnline(); toast('Back online.'); refreshCatalogs().catch((err) => console.warn('Catalog failed:', err)); });
   
   els.modelSelect.addEventListener('change', () => store.set(STORAGE.model, els.modelSelect.value));
+  els.ctxCopy.addEventListener('click', async () => { els.ctxMenu.hidden = true; toast((await copyText(ctxText)) ? 'Copied.' : 'Copy failed.'); });
+  els.ctxRetry.addEventListener('click', () => { els.ctxMenu.hidden = true; retryFrom(ctxTargetIndex); });
 
   els.sendBtn.addEventListener('click', () => (state.generating ? stopGeneration() : sendMessage()));
   els.userInput.addEventListener('input', autoGrow);

@@ -3,7 +3,7 @@
    ========================================================================== */
 
 // Bumped after the fix pass; old v2 caches are deleted on activate.
-const CACHE = 'studio-v6';
+const CACHE = 'studio-v7';
 
 const CORE = ['./', './index.html', './app.js', './engine.js', './storage.js', './memory.js', './style.css', './manifest.json'];
 const NICE_TO_HAVE = ['./icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
@@ -13,6 +13,8 @@ const CDN_URLS = [
   'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js',
   'https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css',
+  'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js',
 ];
 const CDN_HOSTS = new Set(['cdnjs.cloudflare.com', 'cdn.jsdelivr.net']);
 
