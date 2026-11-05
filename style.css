@@ -256,28 +256,39 @@ header {
 #file-name-display { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #remove-file-btn { padding: 6px 4px; background: transparent; border: none; color: var(--danger); font-size: .85rem; }
 
-/* The rounded box */
+/* The rounded box: one big pill holding the text row and a row of pill buttons */
+:root {
+  --pill: #4a4d55;
+  --pill-hover: #565963;
+  --composer-bg: #34363d;
+  --composer-border: #4b4d55;
+  --send-idle: #354e8c;
+  --send-live: #5b8cff;
+  /* Spring: overshoots and settles. Falls back to a bouncy bezier where linear() is unsupported. */
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
+}
+@supports (transition-timing-function: linear(0, 1)) {
+  :root { --spring: linear(0, .234, .619, .896, 1.036, 1.073, 1.06, 1.037, 1.017, 1.004, .998, 1); }
+}
+
 #composer-container {
   display: flex;
   flex-direction: column;
   max-width: var(--col-w);
   margin: 0 auto;
-  background: var(--surface-input);
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  padding: 6px 6px 6px 16px;
-  transition: border-color 0.2s;
+  padding: 8px 8px 8px 20px;
+  background: var(--composer-bg);
+  border: 1px solid var(--composer-border);
+  border-radius: 30px;
+  transition: border-color .2s;
 }
-
-#composer-container:focus-within {
-  border-color: var(--text-faint);
-}
+#composer-container:focus-within { border-color: #6b6e78; }
 
 #user-input {
   width: 100%;
   min-height: var(--tap);
   max-height: 200px;
-  padding: 10px 0;
+  padding: 10px 12px 6px 0;
   background: transparent;
   color: var(--text-strong);
   border: none;
@@ -287,92 +298,76 @@ header {
   outline: none;
 }
 
-#composer-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 4px;
-}
+#composer-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 4px; }
+.composer-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.composer-right { display: flex; align-items: center; flex: none; }
 
-.composer-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* Every control is a pill */
+.composer-icon-btn, .composer-send-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  height: 40px; border: none; border-radius: 999px;
+  touch-action: manipulation;
+  transition: transform .55s var(--spring), background-color .2s, color .2s;
 }
+.composer-icon-btn { min-width: 52px; padding: 0 14px; background: var(--pill); color: #fff; }
+#search-btn { min-width: 46px; padding: 0 12px; }
+.composer-icon-btn .icon { width: 22px; height: 22px; stroke-width: 2.2; }
+#attach-btn .icon { width: 24px; height: 24px; stroke-width: 2; }
 
-.composer-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  background: transparent;
-  color: var(--text-dim);
-  border: none;
-  border-radius: 50%;
-  flex-shrink: 0;
+.composer-send-btn { min-width: 60px; padding: 0 16px; background: var(--send-live); color: #fff; }
+.composer-send-btn .icon { width: 22px; height: 22px; stroke-width: 2.4; }
+.composer-send-btn.is-idle { background: var(--send-idle); color: #8e919b; }
+.composer-send-btn.is-stop { background: #e53935; color: #fff; }
+
+@media (hover: hover) {
+  .composer-icon-btn:hover { background: var(--pill-hover); }
+  .composer-send-btn:hover { transform: scale(1.05); }
 }
-.composer-icon-btn:hover { background: var(--surface-hover); color: var(--text-strong); }
 
 .model-select-wrapper {
-  position: relative;
-  display: flex;
-  align-items: center;
+  position: relative; display: flex; align-items: center; flex: 0 1 auto; min-width: 0;
+  border-radius: 999px; transition: transform .55s var(--spring);
 }
-
-.modern-select {
-  appearance: none;
-  background: var(--surface-hover);
-  color: var(--text);
-  border: none;
-  border-radius: 8px;
-  padding: 6px 28px 6px 12px;
-  font-size: 0.85rem;
-  font-weight: 500;
-  max-width: 140px;
-  text-overflow: ellipsis;
-  cursor: pointer;
-  outline: none;
-}
-/* Add a little dropdown chevron */
 .model-select-wrapper::after {
-  content: "";
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 0;
-  height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--text-dim);
+  content: ""; position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #d6d8de;
   pointer-events: none;
 }
-
+.modern-select {
+  appearance: none; -webkit-appearance: none;
+  width: 100%; max-width: 190px; height: 40px; padding: 0 32px 0 16px;
+  background: var(--pill); color: #fff; border: none; border-radius: 999px;
+  font-size: .85rem; font-weight: 600; text-overflow: ellipsis; cursor: pointer; outline: none;
+  transition: background-color .2s;
+}
+.modern-select:hover { background: var(--pill-hover); }
+.modern-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .modern-select option, .modern-select optgroup { background: var(--surface); color: var(--text-strong); }
+@supports (-webkit-touch-callout: none) { .modern-select { font-size: 16px; } } /* stops iOS zooming on focus */
 
-.composer-right {
-  display: flex;
-  align-items: center;
+/* Press = squash like a spring; release = overshoot and settle. Declared after :hover so it wins. */
+.composer-icon-btn:active, .composer-send-btn:active, .model-select-wrapper:active {
+  transform: scale(.88, .8); transition-duration: .09s, .2s, .2s;
 }
+.model-select-wrapper:active { transition-duration: .09s; }
+@keyframes spring-pop { from { transform: scale(.8, .72); } to { transform: none; } }
+.composer-send-btn.pop { animation: spring-pop .6s var(--spring) backwards; }
 
-.composer-send-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  background: var(--text-strong);
-  color: var(--bg);
-  border: none;
-  border-radius: 50%;
-  flex-shrink: 0;
-  transition: transform 0.1s;
+/* Editing a sent message */
+.msg.user.is-editing { align-self: stretch; max-width: 100%; user-select: text; -webkit-user-select: text; }
+.edit-area {
+  display: block; width: 100%; min-height: 44px; max-height: 260px; padding: 2px 0;
+  background: transparent; color: #fff; border: none; outline: none; resize: none;
+  font: inherit; line-height: 1.5; user-select: text; -webkit-user-select: text;
 }
-.composer-send-btn:hover { transform: scale(1.05); }
-.composer-send-btn.is-stop { background: #e53935; color: #fff; }
-.composer-send-btn .icon { stroke-width: 2.6; }
-#attach-btn .icon { width: 26px; height: 26px; stroke-width: 1.7; }
+.edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.pill-btn {
+  min-height: 36px; padding: 0 18px; background: rgba(255,255,255,.18); color: #fff;
+  border: none; border-radius: 999px; font-size: .85rem; font-weight: 600;
+  transition: transform .5s var(--spring), background-color .2s;
+}
+.pill-btn:active { transform: scale(.92, .86); transition-duration: .09s, .2s; }
+.pill-primary { background: #fff; color: var(--accent-strong); }
 
 /* Context Menu (Long press) */
 .context-menu {
@@ -430,7 +425,7 @@ header {
 .history-item .delete-btn { display: inline-flex; align-items: center; justify-content: center; width: var(--tap); height: var(--tap); flex-shrink: 0; background: none; border: none; color: var(--text-faint); }
 .history-item .delete-btn:hover { color: var(--danger); }
 
-#toast { position: fixed; left: 50%; bottom: calc(88px + var(--safe-bottom)); z-index: 200; max-width: min(90vw, 28rem); padding: 10px 16px; background: #3a3a3a; color: var(--text-strong); border-radius: var(--radius-sm); box-shadow: 0 4px 16px rgba(0,0,0,.4); font-size: .9rem; text-align: center; opacity: 0; pointer-events: none; transform: translate(-50%, 8px); transition: opacity .2s, transform .2s; }
+#toast { position: fixed; left: 50%; bottom: calc(128px + var(--safe-bottom)); z-index: 200; max-width: min(90vw, 28rem); padding: 10px 16px; background: #3a3a3a; color: var(--text-strong); border-radius: var(--radius-sm); box-shadow: 0 4px 16px rgba(0,0,0,.4); font-size: .9rem; text-align: center; opacity: 0; pointer-events: none; transform: translate(-50%, 8px); transition: opacity .2s, transform .2s; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 body.dragging #main::after { content: "Drop files to attach"; position: absolute; inset: 8px; z-index: 60; display: grid; place-items: center; background: rgba(18,18,18,.88); border: 2px dashed var(--accent); border-radius: var(--radius); color: var(--accent); font-size: 1.1rem; pointer-events: none; }

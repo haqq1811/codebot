@@ -15,13 +15,6 @@ export const DEFAULT_SYSTEM_PROMPT =
   'You are a helpful, accurate assistant. Reply in clean Markdown. ' +
   'Put code in fenced blocks and always label the language, for example ```python.';
 
-export const GEMINI_DEFAULTS = [
-  { id: 'gemini-2.5-flash', label: '2.5 Flash' },
-  { id: 'gemini-2.5-flash-lite', label: '2.5 Flash Lite' },
-  { id: 'gemini-2.5-pro', label: '2.5 Pro' },
-  { id: 'gemini-2.0-flash', label: '2.0 Flash' },
-];
-
 const GEMINI_FREE_TIER = new Set([
   'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
   'gemini-2.0-flash', 'gemini-2.0-flash-lite',
@@ -77,7 +70,7 @@ export async function fetchGeminiModels(apiKey, signal) {
   let pageToken = '';
   for (let page = 0; page < 5; page++) {
     const url = `${GEMINI_BASE}/models?pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
-    const res = await fetch(url, { headers: { 'x-goog-api-key': apiKey }, signal });
+    const res = await fetchWithTimeout(url, { headers: { 'x-goog-api-key': apiKey }, signal, timeout: 15000 });
     if (!res.ok) throw await httpError(res);
     const data = await res.json();
     for (const m of data.models ?? []) {
@@ -112,7 +105,7 @@ export function orderGeminiModels(models) {
 }
 
 export async function fetchOpenRouterModels(signal) {
-  const res = await fetch(`${OPENROUTER_BASE}/models`, { signal });
+  const res = await fetchWithTimeout(`${OPENROUTER_BASE}/models`, { signal, timeout: 15000 });
   if (!res.ok) throw await httpError(res);
   const data = await res.json();
   const price = (v) => (v == null || v === '' ? NaN : Number(v));
@@ -385,12 +378,75 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal, webS
 
 const RUNNERS = { gemini: streamGemini, openrouter: streamOpenRouter };
 
-const idsOf = (provider) => {
-  const list = getCatalog(provider);
-  return (list.length ? list : provider === 'gemini' ? GEMINI_DEFAULTS : []).map((m) => m.id);
-};
+/* ---------- Fallback planning ----------
+   Fallbacks come ONLY from the live (or last cached) catalog, never from a hardcoded list, so
+   they can't name models that were retired. Models that just failed are put on a cooldown so
+   they are not picked again. OpenRouter fallbacks are free models only (no surprise charges)
+   that can actually read what is attached. */
 
-function buildAttempts(selected, keys) {
+const COOLDOWN_KEY = 'MODEL_COOLDOWNS_V1';
+const GONE_MS = 6 * 60 * 60 * 1000; // 404 / "no endpoints" / retired
+const BUSY_MS = 2 * 60 * 1000;      // 429 / 5xx / timeout
+
+function readCooldowns() {
+  try {
+    const map = JSON.parse(localStorage.getItem(COOLDOWN_KEY)) || {};
+    const now = Date.now();
+    for (const k of Object.keys(map)) if (!(map[k] > now)) delete map[k];
+    return map;
+  } catch { return {}; }
+}
+function coolDown(provider, id, ms) {
+  try {
+    const map = readCooldowns();
+    map[`${provider}:${id}`] = Date.now() + ms;
+    localStorage.setItem(COOLDOWN_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+const statusOf = (err) => Number(err?.status) || 0;
+const messageOf = (err) => String(err?.message ?? '');
+const isGone = (err) => statusOf(err) === 404
+  || /no endpoints found|no longer available|not found for api|is not found|does not exist|has been (?:removed|retired|deprecated)/i.test(messageOf(err));
+const isBusy = (err) => statusOf(err) === 429 || statusOf(err) >= 500 || /took too long/i.test(messageOf(err));
+
+function requirementsOf(messages) {
+  const needs = new Set();
+  let chars = 0;
+  for (const m of messages) {
+    chars += m.content?.length ?? 0;
+    for (const f of m.files ?? []) {
+      chars += f.text?.length ?? 0;
+      const mime = f.mime || '';
+      if (f.data && mime.startsWith('image/')) needs.add('image');
+      else if (f.data && mime === 'application/pdf') needs.add('file');
+      else if (f.data && AUDIO_FORMATS[mime]) needs.add('audio');
+    }
+  }
+  return { needs, tokens: Math.ceil(chars / 3.5) };
+}
+
+const OPENROUTER_PREFERRED = [/deepseek.*r1/i, /llama-3\.3/i, /qwen/i];
+const isStable = (id) => !/preview|exp/i.test(id);
+
+function geminiCandidates(skip) {
+  const live = getCatalog('gemini').filter((m) => !skip(`gemini:${m.id}`));
+  return [...live.filter((m) => isStable(m.id)), ...live.filter((m) => !isStable(m.id))].map((m) => m.id);
+}
+
+function openRouterCandidates(skip, { needs, tokens }) {
+  const rank = (id) => { const i = OPENROUTER_PREFERRED.findIndex((re) => re.test(id)); return i < 0 ? OPENROUTER_PREFERRED.length : i; };
+  return getCatalog('openrouter')
+    .filter((m) => m.free === true && !skip(`openrouter:${m.id}`))
+    .filter((m) => [...needs].every((n) => (m.input ?? ['text']).includes(n)))
+    .filter((m) => !m.ctx || m.ctx >= Math.max(8000, tokens * 1.15 + 1500))
+    .sort((a, b) => rank(a.id) - rank(b.id) || (b.ctx || 0) - (a.ctx || 0))
+    .map((m) => m.id);
+}
+
+export function buildAttempts(selected, keys, req = { needs: new Set(), tokens: 0 }) {
+  const cooling = readCooldowns();
+  const skip = (tag) => tag in cooling;
   const attempts = [];
   const seen = new Set();
   const add = (provider, id) => {
@@ -400,15 +456,17 @@ function buildAttempts(selected, keys) {
     attempts.push({ provider, model: id });
     return true;
   };
-  add(selected.provider, selected.id);
+  const candidates = (provider) => (provider === 'gemini' ? geminiCandidates(skip) : openRouterCandidates(skip, req));
+
+  add(selected.provider, selected.id); // the user's own choice is always tried first, cooldown or not
   let extra = 0;
-  for (const id of idsOf(selected.provider)) {
+  for (const id of candidates(selected.provider)) {
     if (extra >= SAME_PROVIDER_FALLBACKS) break;
     if (add(selected.provider, id)) extra++;
   }
   const other = PROVIDERS.find((p) => p !== selected.provider);
   extra = 0;
-  for (const id of idsOf(other)) {
+  for (const id of candidates(other)) {
     if (extra >= OTHER_PROVIDER_FALLBACKS) break;
     if (add(other, id)) extra++;
   }
@@ -424,8 +482,9 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
     );
   }
 
-  const attempts = buildAttempts(selected, keys);
+  const attempts = buildAttempts(selected, keys, requirementsOf(messages));
   let lastError = null;
+  let best = null; // the most informative failure, so a phantom model's 404 can't hide the real cause
 
   for (let i = 0; i < attempts.length; i++) {
     const target = attempts[i];
@@ -434,7 +493,7 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
     let produced = false;
     try {
       const run = RUNNERS[target.provider]({
-        model: target.model, apiKey: keys[target.provider], messages, system, signal, webSearch
+        model: target.model, apiKey: keys[target.provider], messages, system, signal, webSearch,
       });
       for await (const chunk of run) {
         if (chunk.type === 'text' || chunk.type === 'thought') produced = true;
@@ -442,22 +501,32 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
       }
       return;
     } catch (err) {
-      if (signal?.aborted) return; 
-      
-      lastError = err.name === 'AbortError' ? new Error('Model took too long to respond.') : err;
-      
+      if (signal?.aborted) return;
+
+      lastError = err?.name === 'AbortError' ? new Error('Model took too long to respond.') : err;
       if (produced) throw lastError;
+
+      if (isGone(lastError)) coolDown(target.provider, target.model, GONE_MS);
+      else if (isBusy(lastError)) coolDown(target.provider, target.model, BUSY_MS);
+
+      // A bad key on a fallback provider only rules out that provider; keep going.
+      const authOnFallback = i > 0 && [401, 403].includes(statusOf(lastError));
+      if (!shouldFallback(lastError) && !authOnFallback) throw lastError;
+
+      const rank = i > 0 && (isGone(lastError) || authOnFallback) ? 0 : 1;
+      if (!best || rank > best.rank) best = { err: lastError, rank };
+
       const next = attempts[i + 1];
-      if (!next || !shouldFallback(lastError)) throw lastError;
-      yield { type: 'fallback', from: target, to: next, reason: String(lastError?.message ?? lastError).slice(0, 80) };
+      if (!next) break;
+      yield { type: 'fallback', from: target, to: next, reason: messageOf(lastError).slice(0, 80) };
     }
   }
-  throw lastError ?? new Error('No model is available.');
+  throw best?.err ?? lastError ?? new Error('No model is available.');
 }
 
 export function pickHelperModel(keys, selected) {
   if (keys.gemini) {
-    const ids = idsOf('gemini');
+    const ids = getCatalog('gemini').map((m) => m.id);
     const id = ids.find((i) => GEMINI_FREE_TIER.has(i) && /flash-lite/.test(i))
       || ids.find((i) => GEMINI_FREE_TIER.has(i) && /flash/.test(i));
     if (id) return { provider: 'gemini', id };

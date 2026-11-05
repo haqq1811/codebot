@@ -44,7 +44,7 @@ const els = {
   closeKeyBtn: $('close-key-btn'), removeKeyBtn: $('remove-key-btn'), toggleKeyBtn: $('toggle-key-btn'),
   menuBtn: $('menu-btn'), sidebar: $('sidebar'), overlay: $('sidebar-overlay'), newChatBtn: $('new-chat-btn'),
   historyList: $('history-list'), toast: $('toast'),
-  ctxMenu: $('context-menu'), ctxCopy: $('ctx-copy'), ctxRetry: $('ctx-retry')
+  ctxMenu: $('context-menu'), ctxCopy: $('ctx-copy'), ctxRetry: $('ctx-retry'), ctxEdit: $('ctx-edit')
 };
 const state = {
   history: [], ui: [], attachments: [], pendingReads: new Set(),
@@ -111,8 +111,9 @@ async function refreshCatalogs({ force = false } = {}) {
   const keys = keyStore.all(), cached = loadCatalogCache(), errors = {}, jobs = [];
   const isFresh = (p) => !force && cached[p]?.models?.length > 0 && Date.now() - (cached[p].ts ?? 0) < CATALOG_MAX_AGE_MS;
 
-  if (keys.openrouter && isFresh('openrouter')) setCatalog('openrouter', cached.openrouter.models);
-  if (keys.gemini && isFresh('gemini')) setCatalog('gemini', cached.gemini.models);
+  // Seed from the cache even when stale (the fetch below replaces it), so the fallback router
+  // never works from a different list than the dropdown shows.
+  for (const p of ['openrouter', 'gemini']) if (keys[p] && cached[p]?.models?.length) setCatalog(p, cached[p].models);
 
   if (keys.openrouter && !isFresh('openrouter')) {
     jobs.push((async () => {
@@ -318,6 +319,7 @@ function renderAttachments() {
   els.filePreviewBar.hidden = count === 0; els.removeFileBtn.hidden = count === 0;
   els.fileNameDisplay.textContent = loading ? 'Reading files…' : `Attached: ${count} file(s), ${formatBytes(total)}`;
   if (added) els.thumbStrip.scrollLeft = els.thumbStrip.scrollWidth;
+  syncSendState();
 }
 function estimateBytes(turns) {
   let total = 0; for (const turn of turns) { total += turn.content?.length ?? 0; for (const f of turn.files ?? []) total += (f.data?.length ?? 0) + (f.text?.length ?? 0); } return total;
@@ -423,13 +425,16 @@ function enableLongPress(node, text, index) {
   let timer = 0, sx = 0, sy = 0, fired = false;
   const cancel = () => { clearTimeout(timer); timer = 0; };
   node.addEventListener('pointerdown', (e) => {
-    if (e.pointerType === 'mouse') return;
+    if (e.pointerType === 'mouse' || node.classList.contains('is-editing')) return;
     sx = e.clientX; sy = e.clientY; fired = false;
-    timer = setTimeout(() => { fired = true; navigator.vibrate?.(15); showContextMenu(sx, sy, text, index); }, 450);
+    timer = setTimeout(() => { fired = true; navigator.vibrate?.(15); showContextMenu(sx, sy, text, index, node); }, 450);
   });
   node.addEventListener('pointermove', (e) => { if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 12) cancel(); });
   ['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => node.addEventListener(t, cancel));
-  node.addEventListener('contextmenu', (e) => { e.preventDefault(); if (!fired) showContextMenu(e.clientX, e.clientY, text, index); });
+  node.addEventListener('contextmenu', (e) => {
+    if (node.classList.contains('is-editing')) return; // let the editor keep its native paste/select menu
+    e.preventDefault(); if (!fired) showContextMenu(e.clientX, e.clientY, text, index, node);
+  });
 }
 function renderUserMessage({ text = '', files = [] }, index) {
   const msg = createMessage('user');
@@ -440,8 +445,8 @@ function renderUserMessage({ text = '', files = [] }, index) {
     });
     msg.append(list);
   }
-  if (text) msg.append(document.createTextNode(text));
-  
+  if (text) msg.append(el('span', 'msg-text', text));
+
   enableLongPress(msg, text, index);
   return msg;
 }
@@ -513,11 +518,12 @@ function renderTranscript() {
   scrollToBottom(true);
 }
 
-let ctxText = '';
-function showContextMenu(x, y, text, index) {
-  ctxText = text; ctxTargetIndex = index;
+let ctxText = '', ctxNode = null;
+function showContextMenu(x, y, text, index, node) {
+  ctxText = text; ctxTargetIndex = index; ctxNode = node;
+  els.ctxCopy.hidden = !text;
   els.ctxMenu.hidden = false;
-  const w = els.ctxMenu.offsetWidth || 140, h = els.ctxMenu.offsetHeight || 96;
+  const w = els.ctxMenu.offsetWidth || 140, h = els.ctxMenu.offsetHeight || 140;
   els.ctxMenu.style.left = `${Math.max(8, Math.min(x - w / 2, window.innerWidth - w - 8))}px`;
   els.ctxMenu.style.top = `${Math.max(8, Math.min(y - h - 24, window.innerHeight - h - 8))}px`;
 }
@@ -526,7 +532,15 @@ document.addEventListener('pointerdown', (e) => {
 });
 function setBusy(busy) {
   state.generating = busy; els.sendBtn.classList.toggle('is-stop', busy); els.sendBtn.setAttribute('aria-label', busy ? 'Stop' : 'Send');
-  els.sendBtn.replaceChildren(icon(busy ? 'stop' : 'send'));
+  els.sendBtn.replaceChildren(icon(busy ? 'stop' : 'send')); syncSendState();
+}
+// Dim the send pill while there is nothing to send; light it up as soon as there is.
+function syncSendState() {
+  const empty = !els.userInput.value.trim() && state.attachments.length === 0;
+  els.sendBtn.classList.toggle('is-idle', empty && !state.generating);
+}
+function popSend() {
+  const b = els.sendBtn; b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
 }
 function stopGeneration() { state.abort?.abort(); }
 function ensureKeyFor(provider) {
@@ -557,25 +571,71 @@ async function sendMessage() {
   await runTurn({ message, ui });
 }
 
-async function retryFrom(targetIndex) {
-  if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
-  if (!navigator.onLine) { toast("You're offline."); return; }
+function canRun() {
+  if (state.generating) { toast('Wait for the current response or press Stop.'); return false; }
+  if (!navigator.onLine) { toast("You're offline."); return false; }
+  return ensureKeyFor(parseModelValue(els.modelSelect.value).provider);
+}
 
+// Drop everything from the user message at userIndex onward.
+function rewindTo(userIndex) {
+  state.history = state.history.slice(0, userIndex);
+  state.ui = state.ui.slice(0, userIndex);
+  // A summary stays valid as long as it only covers messages that still exist.
+  if (state.summarizedCount > userIndex) { state.summarizedCount = 0; state.summary = ''; }
+  state.notesCursor = Math.min(state.notesCursor, userIndex);
+}
+
+async function retryFrom(targetIndex) {
+  if (!canRun()) return;
   let userIndex = Math.min(targetIndex, state.history.length - 1);
   while (userIndex >= 0 && state.history[userIndex]?.role !== 'user') userIndex--;
   if (userIndex < 0) return;
 
-  const targetMsg = JSON.parse(JSON.stringify(state.history[userIndex]));
-  const targetUi = JSON.parse(JSON.stringify(state.ui[userIndex] ?? { role: 'user', text: targetMsg.content, files: [] }));
-
-  state.history = state.history.slice(0, userIndex);
-  state.ui = state.ui.slice(0, userIndex);
-  // The old summary may cover messages that no longer exist, so drop it and let it rebuild.
-  if (state.summarizedCount > 0) { state.summarizedCount = 0; state.summary = ''; }
-  state.notesCursor = Math.min(state.notesCursor, userIndex);
-
+  const message = state.history[userIndex];
+  const ui = state.ui[userIndex] ?? { role: 'user', text: message.content, files: [] };
+  rewindTo(userIndex);
   renderTranscript();
-  await runTurn({ message: targetMsg, ui: targetUi });
+  await runTurn({ message, ui });
+}
+
+async function editFrom(index, newText) {
+  if (!canRun()) return;
+  const old = state.history[index];
+  if (old?.role !== 'user') return;
+  const text = newText.trim();
+  if (!text && !old.files?.length) { toast('A message needs some text or a file.'); return; }
+  const oldUi = state.ui[index] ?? { role: 'user', files: [] };
+  const turn = { message: { ...old, content: text }, ui: { ...oldUi, text } };
+  rewindTo(index);
+  renderTranscript();
+  await runTurn(turn);
+}
+
+// Swap the bubble's text for an editor. Sending rewrites the chat from this message onward.
+function beginEdit(node, index) {
+  if (!node || node.classList.contains('is-editing')) return;
+  if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
+  const textEl = node.querySelector('.msg-text');
+  const area = el('textarea', 'edit-area'); area.rows = 1; area.value = state.ui[index]?.text ?? '';
+  area.setAttribute('aria-label', 'Edit message');
+  const grow = () => { area.style.height = 'auto'; area.style.height = `${Math.min(area.scrollHeight, 260)}px`; };
+  const bar = el('div', 'edit-actions');
+  const cancel = el('button', 'pill-btn', 'Cancel'); cancel.type = 'button';
+  const send = el('button', 'pill-btn pill-primary', 'Send'); send.type = 'button';
+  const close = () => { area.remove(); bar.remove(); if (textEl) textEl.hidden = false; node.classList.remove('is-editing'); };
+  cancel.addEventListener('click', close);
+  send.addEventListener('click', () => editFrom(index, area.value));
+  area.addEventListener('input', grow);
+  area.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); close(); }
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); editFrom(index, area.value); }
+  });
+  if (textEl) textEl.hidden = true;
+  node.classList.add('is-editing');
+  bar.append(cancel, send); node.append(area, bar);
+  grow(); area.focus(); area.setSelectionRange(area.value.length, area.value.length);
+  node.scrollIntoView({ block: 'nearest' });
 }
 
 async function runTurn(turn) {
@@ -690,6 +750,7 @@ function describeError(err) {
   if (status === 401 || status === 403 || /api key|API_KEY_INVALID/i.test(message)) friendly = 'Your API key was rejected.';
   else if (status === 402) friendly = 'Needs OpenRouter credits.';
   else if (status === 429) friendly = 'Rate limit reached. Wait a moment.';
+  else if (status === 404 || /no endpoints found|is not found/i.test(message)) friendly = 'That model is unavailable right now.';
   else if (status === 503 || /overloaded|unavailable/i.test(message)) friendly = 'Model overloaded. Try again shortly.';
   else if (status === 413 || /too large|exceeds the maximum/i.test(message)) friendly = 'Request too large.';
   else if (err instanceof TypeError || /failed to fetch|network/i.test(message)) friendly = 'Network error.';
@@ -728,6 +789,13 @@ async function dbListSessions() {
     cursor.onsuccess = () => { const c = cursor.result; if (!c) return; out.push(c.value); c.continue(); };
     tx.oncomplete = () => resolve(out.sort((a, b) => b.timestamp - a.timestamp)); tx.onabort = tx.onerror = () => reject(tx.error);
   });
+}
+
+// Older saved chats may have no UI transcript; rebuild one from the raw history.
+function deriveUi(history) {
+  return history.map((m) => (m.role === 'user'
+    ? { role: 'user', text: m.content ?? '', files: (m.files ?? []).map(({ name, size, kind, ext }) => ({ name, size, kind, ext })) }
+    : { role: 'ai', text: m.content ?? '', thoughts: m.thoughts ?? '', model: m.model ?? '', stats: null }));
 }
 
 function makeTitle(ui) {
@@ -878,7 +946,7 @@ function syncSidebarToViewport() {
   els.menuBtn.setAttribute('aria-expanded', String(isSidebarOpen()));
 }
 
-function autoGrow() { els.userInput.style.height = 'auto'; els.userInput.style.height = `${Math.min(els.userInput.scrollHeight, 200)}px`; }
+function autoGrow() { els.userInput.style.height = 'auto'; els.userInput.style.height = `${Math.min(els.userInput.scrollHeight, 200)}px`; syncSendState(); }
 
 function trackViewport() {
   const vv = window.visualViewport; if (!vv) return;
@@ -970,13 +1038,23 @@ function init() {
   els.modelSelect.addEventListener('change', () => store.set(STORAGE.model, els.modelSelect.value));
   els.ctxCopy.addEventListener('click', async () => { els.ctxMenu.hidden = true; toast((await copyText(ctxText)) ? 'Copied.' : 'Copy failed.'); });
   els.ctxRetry.addEventListener('click', () => { els.ctxMenu.hidden = true; retryFrom(ctxTargetIndex); });
+  els.ctxEdit.addEventListener('click', () => { els.ctxMenu.hidden = true; beginEdit(ctxNode, ctxTargetIndex); });
 
-  els.sendBtn.addEventListener('click', () => (state.generating ? stopGeneration() : sendMessage()));
+  els.sendBtn.addEventListener('pointerdown', () => navigator.vibrate?.(8));
+  els.sendBtn.addEventListener('click', () => {
+    if (state.generating) { stopGeneration(); return; }
+    if (!els.sendBtn.classList.contains('is-idle')) popSend();
+    sendMessage();
+  });
   els.userInput.addEventListener('input', autoGrow);
   els.userInput.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || e.isComposing) return;
     const touch = window.matchMedia('(pointer: coarse)').matches;
-    if (e.ctrlKey || e.metaKey || (!e.shiftKey && !touch)) { e.preventDefault(); sendMessage(); }
+    if (e.ctrlKey || e.metaKey || (!e.shiftKey && !touch)) {
+      e.preventDefault();
+      if (!state.generating && !els.sendBtn.classList.contains('is-idle')) popSend();
+      sendMessage();
+    }
   });
   els.userInput.addEventListener('paste', (e) => { const files = e.clipboardData?.files; if (files?.length && !e.clipboardData.getData('text/plain')) { e.preventDefault(); addFiles(files); } });
 
