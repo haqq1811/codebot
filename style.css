@@ -492,3 +492,48 @@ body.dragging #main::after { content: "Drop files to attach"; position: absolute
 .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; margin: .6em 0; }
 .svg-preview { padding: 40px 14px 14px; text-align: center; overflow-x: auto; background: #fff; }
 .svg-preview svg { max-width: 100%; height: auto; }
+
+
+/* ---------- Code artifacts ---------- */
+.artifact-card {
+  display: flex; align-items: center; gap: 12px; width: 100%; margin: .75em 0; padding: 12px 14px;
+  background: #1b1b1b; border: 1px solid var(--border-strong); border-radius: 14px;
+  color: var(--text); text-align: left; touch-action: manipulation;
+  transition: transform .5s var(--spring), background-color .2s;
+}
+.artifact-card:hover { background: var(--surface-raised); }
+.artifact-card:active { transform: scale(.98); transition-duration: .09s, .2s; }
+.ac-icon { display: grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: 10px; background: var(--surface-hover); color: var(--accent); }
+.ac-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.ac-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .95rem; font-weight: 600; color: var(--text-strong); }
+.ac-sub { font-size: .8rem; color: var(--text-faint); }
+
+.artifact-viewer { position: fixed; inset: 0; z-index: 150; display: flex; flex-direction: column; height: var(--app-h, 100dvh); background: var(--bg); }
+.av-header {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: calc(8px + var(--safe-top)) calc(10px + var(--safe-right)) 8px calc(10px + var(--safe-left));
+  background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.av-titles { flex: 1; min-width: 0; }
+.av-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .95rem; font-weight: 600; color: var(--text-strong); }
+.av-sub { font-size: .75rem; color: var(--text-faint); }
+.av-menu-wrap { position: relative; flex: none; }
+.av-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 2; display: flex; flex-direction: column; min-width: 172px; padding: 4px;
+  background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+.av-menu button { display: flex; align-items: center; gap: 12px; padding: 12px; background: none; border: none; border-radius: 10px; color: var(--text); font-size: .95rem; text-align: left; }
+.av-menu button:hover { background: var(--surface-hover); }
+.av-menu .icon { width: 18px; height: 18px; color: var(--text-dim); }
+
+.av-body {
+  flex: 1; min-height: 0; display: flex; align-items: flex-start; overflow: auto; overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch; padding-bottom: var(--safe-bottom); background: #161616;
+}
+.av-gutter, .av-pre { margin: 0; font: .8rem/1.5 var(--mono); }
+.av-gutter {
+  position: sticky; left: 0; flex: none; padding: 14px 10px 14px calc(12px + var(--safe-left));
+  background: #161616; border-right: 1px solid var(--border); color: #6b6f76; text-align: right; white-space: pre; user-select: none; -webkit-user-select: none;
+}
+.av-pre { flex: none; padding: 14px 16px calc(14px + var(--safe-right)); background: transparent; }
+.av-pre code, .av-pre code.hljs { display: block; padding: 0; background: transparent; font: inherit; white-space: pre; }

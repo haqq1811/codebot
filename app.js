@@ -19,6 +19,23 @@ const STICK_THRESHOLD = 80;
 const STREAM_PAINT_MS = 100;
 const THUMB_SIZE = 192;
 
+// Code blocks with at least this many lines become a tappable card that opens a full-screen viewer.
+const ARTIFACT_MIN_LINES = 50;
+const ARTIFACT_HIGHLIGHT_MAX_LINES = 4000; // above this, skip syntax colouring so the viewer opens instantly
+const LANG_EXT = {
+  javascript: 'js', js: 'js', jsx: 'jsx', typescript: 'ts', ts: 'ts', tsx: 'tsx', python: 'py', py: 'py',
+  html: 'html', css: 'css', scss: 'scss', json: 'json', bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh',
+  java: 'java', kotlin: 'kt', c: 'c', cpp: 'cpp', 'c++': 'cpp', csharp: 'cs', cs: 'cs', go: 'go',
+  rust: 'rs', rs: 'rs', ruby: 'rb', php: 'php', swift: 'swift', sql: 'sql', yaml: 'yml', yml: 'yml',
+  xml: 'xml', svg: 'svg', markdown: 'md', md: 'md', dart: 'dart', lua: 'lua', r: 'r', toml: 'toml',
+};
+const LANG_NAME = {
+  js: 'JavaScript', javascript: 'JavaScript', ts: 'TypeScript', typescript: 'TypeScript', py: 'Python', python: 'Python',
+  html: 'HTML', css: 'CSS', json: 'JSON', bash: 'Bash', sh: 'Shell', sql: 'SQL', cpp: 'C++', 'c++': 'C++',
+  csharp: 'C#', cs: 'C#', yaml: 'YAML', yml: 'YAML', xml: 'XML', svg: 'SVG', md: 'Markdown', markdown: 'Markdown',
+};
+const KNOWN_EXT = new Set([...Object.values(LANG_EXT), 'txt']);
+
 const KIND_ICON = { image: 'image', video: 'play', audio: 'music', text: 'code', pdf: 'file', file: 'file' };
 const TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'html', 'htm', 'css', 'scss',
@@ -375,6 +392,8 @@ function enhanceContent(root) {
   root.querySelectorAll('pre').forEach((pre) => {
     if (pre.parentElement.classList.contains('code-block')) return;
     const code = pre.querySelector('code'), lang = code?.className.match(/language-([\w+#-]+)/)?.[1] || '';
+    const source = (code ?? pre).textContent;
+    if (countLines(source) >= ARTIFACT_MIN_LINES) { pre.replaceWith(buildArtifactCard(source, lang.toLowerCase())); return; }
     if (code) highlightCode(code, lang);
     const copy = el('button', 'copy-btn', 'Copy'); copy.type = 'button'; copy.setAttribute('aria-label', 'Copy code');
     copy.addEventListener('click', async () => {
@@ -390,6 +409,95 @@ function enhanceContent(root) {
     const wrap = el('div', 'table-wrap'); table.replaceWith(wrap); wrap.append(table);
   });
 }
+/* ---------- Code artifacts: long code becomes a card; tapping it opens a viewer ---------- */
+const countLines = (text) => text.replace(/\n+$/, '').split('\n').length;
+const avEls = {
+  root: $('artifact-viewer'), title: $('av-title'), sub: $('av-sub'), body: $('av-body'), gutter: $('av-gutter'), pre: $('av-pre'),
+  close: $('av-close'), more: $('av-more'), menu: $('av-menu'),
+  download: $('av-download'), share: $('av-share'), copy: $('av-copy'),
+};
+let currentArtifact = null, artifactFocus = null;
+
+// Looks for a name like "// app.js" or "# utils.py" in the first lines; otherwise falls back to code.<ext>.
+function guessFilename(source, lang) {
+  for (const line of source.split('\n', 3)) {
+    const m = /^\s*(?:\/\/|#!?|\/\*+|<!--|--|;)\s*(?:file(?:name)?\s*:\s*)?(\w[\w./-]{0,60}\.([A-Za-z0-9]{1,6}))(?:\s|$)/i.exec(line);
+    if (m && KNOWN_EXT.has(m[2].toLowerCase())) return { name: m[1].split('/').pop(), detected: true };
+  }
+  return { name: `code.${LANG_EXT[lang] || 'txt'}`, detected: false };
+}
+function langLabel(lang) { return LANG_NAME[lang] || (lang ? lang[0].toUpperCase() + lang.slice(1) : 'Code'); }
+
+function buildArtifactCard(source, lang) {
+  const text = source.replace(/\n+$/, '');
+  const file = guessFilename(text, lang), label = langLabel(lang);
+  const av = { source: text, lang, lines: countLines(text), filename: file.name, title: file.detected ? file.name : `${label} code`, label };
+  const card = el('button', 'artifact-card'); card.type = 'button'; card.setAttribute('aria-label', `Open ${av.title}, ${av.lines} lines`);
+  const iconBox = el('span', 'ac-icon'); iconBox.append(icon('code'));
+  const info = el('span', 'ac-text');
+  info.append(el('span', 'ac-title', av.title), el('span', 'ac-sub', `${label} · ${av.lines} lines · Tap to open`));
+  card.append(iconBox, info);
+  card.addEventListener('click', () => openArtifact(av));
+  return card;
+}
+
+function openArtifact(av) {
+  currentArtifact = av; artifactFocus = document.activeElement;
+  avEls.title.textContent = av.title; avEls.sub.textContent = `${av.label} · ${av.lines} lines`;
+  const code = el('code'); if (av.lang) code.className = `language-${av.lang}`; code.textContent = av.source;
+  if (av.lines <= ARTIFACT_HIGHLIGHT_MAX_LINES) highlightCode(code, av.lang);
+  avEls.pre.replaceChildren(code);
+  avEls.gutter.textContent = Array.from({ length: av.lines }, (_, i) => i + 1).join('\n');
+  avEls.body.scrollTop = 0; avEls.body.scrollLeft = 0;
+  closeAvMenu(); avEls.root.hidden = false;
+  history.pushState({ av: 1 }, ''); // so the phone's Back gesture closes the viewer instead of leaving the app
+  avEls.close.focus({ preventScroll: true });
+}
+function closeArtifact({ fromPop = false } = {}) {
+  if (avEls.root.hidden) return;
+  avEls.root.hidden = true; closeAvMenu(); currentArtifact = null;
+  avEls.pre.replaceChildren(); avEls.gutter.textContent = '';
+  if (!fromPop && history.state?.av) history.back();
+  artifactFocus?.focus?.({ preventScroll: true }); artifactFocus = null;
+}
+function closeAvMenu() { avEls.menu.hidden = true; avEls.more.setAttribute('aria-expanded', 'false'); }
+function toggleAvMenu() {
+  const open = avEls.menu.hidden; avEls.menu.hidden = !open; avEls.more.setAttribute('aria-expanded', String(open));
+}
+
+function downloadArtifact() {
+  const av = currentArtifact; if (!av) return;
+  const url = URL.createObjectURL(new Blob([av.source], { type: 'text/plain;charset=utf-8' }));
+  const a = el('a'); a.href = url; a.download = av.filename; a.hidden = true;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  toast(`Download started: ${av.filename}`);
+}
+async function shareArtifact() {
+  const av = currentArtifact; if (!av) return;
+  try {
+    const file = new File([av.source], av.filename, { type: 'text/plain' });
+    if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: av.filename });
+    else if (navigator.share) await navigator.share({ title: av.filename, text: av.source });
+    else { await copyText(av.source); toast('Sharing not supported. Copied instead.'); }
+  } catch (err) { if (err?.name !== 'AbortError') toast('Could not share.'); }
+}
+async function copyArtifact() {
+  if (!currentArtifact) return;
+  toast((await copyText(currentArtifact.source)) ? 'Code copied.' : 'Copy failed.');
+}
+function wireArtifactViewer() {
+  avEls.close.addEventListener('click', () => closeArtifact());
+  avEls.more.addEventListener('click', toggleAvMenu);
+  avEls.download.addEventListener('click', () => { closeAvMenu(); downloadArtifact(); });
+  avEls.share.addEventListener('click', () => { closeAvMenu(); shareArtifact(); });
+  avEls.copy.addEventListener('click', () => { closeAvMenu(); copyArtifact(); });
+  document.addEventListener('pointerdown', (e) => {
+    if (!avEls.menu.hidden && !avEls.menu.contains(e.target) && !avEls.more.contains(e.target)) closeAvMenu();
+  });
+  window.addEventListener('popstate', () => closeArtifact({ fromPop: true }));
+}
+
 function createMessage(role) {
   const msg = el('div', `msg ${role}`); els.chatBox.append(msg); els.emptyState.hidden = true; return msg;
 }
@@ -1076,14 +1184,16 @@ function init() {
     Object.values(keyInputs).forEach((i) => { if (i) i.type = show ? 'text' : 'password'; });
     els.toggleKeyBtn.textContent = show ? 'Hide' : 'Show'; els.toggleKeyBtn.setAttribute('aria-pressed', String(show));
   });
-  els.keyModal.addEventListener('click', (e) => { if (e.target === els.keyModal) closeKeyModal(); }); wireMemoryModal();
+  els.keyModal.addEventListener('click', (e) => { if (e.target === els.keyModal) closeKeyModal(); }); wireMemoryModal(); wireArtifactViewer();
 
   els.menuBtn.addEventListener('click', () => setSidebar(!isSidebarOpen())); els.overlay.addEventListener('click', () => setSidebar(false));
   els.newChatBtn.addEventListener('click', startNewChat); desktopMQ.addEventListener('change', syncSidebarToViewport); syncSidebarToViewport();
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!els.keyModal.hidden) closeKeyModal();
+    if (!avEls.menu.hidden) closeAvMenu();
+    else if (!avEls.root.hidden) closeArtifact();
+    else if (!els.keyModal.hidden) closeKeyModal();
     else if (!memoryEls.modal.hidden) closeMemoryModal();
     else if (!desktopMQ.matches && isSidebarOpen()) setSidebar(false);
     else if (!els.ctxMenu.hidden) els.ctxMenu.hidden = true;

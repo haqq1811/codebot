@@ -46,6 +46,8 @@
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
     <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
     <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="19" r="1.6" fill="currentColor"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></symbol>
   </svg>
 
@@ -183,6 +185,33 @@
     <button id="ctx-edit" type="button"><svg class="icon"><use href="#i-edit"/></svg> Edit</button>
     <button id="ctx-copy" type="button"><svg class="icon"><use href="#i-copy"/></svg> Copy</button>
     <button id="ctx-retry" type="button"><svg class="icon"><use href="#i-refresh"/></svg> Retry</button>
+  </div>
+
+  <!-- Full-screen viewer for long code -->
+  <div id="artifact-viewer" class="artifact-viewer" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
+    <header class="av-header">
+      <button id="av-close" class="icon-btn" type="button" aria-label="Close">
+        <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+      <div class="av-titles">
+        <div id="av-title" class="av-title"></div>
+        <div id="av-sub" class="av-sub"></div>
+      </div>
+      <div class="av-menu-wrap">
+        <button id="av-more" class="icon-btn" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">
+          <svg class="icon" aria-hidden="true"><use href="#i-more"/></svg>
+        </button>
+        <div id="av-menu" class="av-menu" role="menu" hidden>
+          <button id="av-download" type="button" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg> Download</button>
+          <button id="av-share" type="button" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-share"/></svg> Share</button>
+          <button id="av-copy" type="button" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg> Copy</button>
+        </div>
+      </div>
+    </header>
+    <div id="av-body" class="av-body">
+      <div id="av-gutter" class="av-gutter" aria-hidden="true"></div>
+      <pre id="av-pre" class="av-pre"></pre>
+    </div>
   </div>
 
   <div id="toast" role="status" aria-live="polite"></div>
