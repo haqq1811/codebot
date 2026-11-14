@@ -9,6 +9,10 @@ export const NOTES_EVERY = 4;
 export const NOTES_LOOKBACK = 16;
 export const MAX_NOTES = 40;
 export const MAX_NOTE_CHARS = 200;
+// Notes ride along with EVERY request, so only the newest ones that fit this budget are sent.
+export const NOTES_PROMPT_CHARS = 1200;
+// Attachments from older turns are re-sent only while they fit this budget (characters of text/base64).
+export const OLD_FILE_BUDGET = 60_000;
 
 export const SUMMARY_SYSTEM =
   'You keep a running summary of a conversation so an assistant can continue it later without seeing the older messages. ' +
@@ -33,8 +37,43 @@ export function foldBoundary(history) {
   return Math.max(i, 0);
 }
 
+function fitNotes(notes) {
+  const picked = [];
+  let used = 0;
+  for (let i = notes.length - 1; i >= 0; i--) {
+    used += notes[i].length + 3;
+    if (used > NOTES_PROMPT_CHARS) break;
+    picked.unshift(notes[i]);
+  }
+  return picked;
+}
+
+/**
+ * Files stay on the stored message, but older ones are not re-uploaded every turn.
+ * The newest message with files is always sent in full; older ones are kept only while they
+ * fit OLD_FILE_BUDGET (small text files usually do, images/PDFs/audio/video usually don't).
+ */
+export function slimFiles(messages) {
+  let latest = -1;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].files?.length) { latest = i; break; }
+  if (latest < 0) return messages;
+  const size = (m) => m.files.reduce((s, f) => s + (f.data?.length ?? f.text?.length ?? 0), 0);
+  const slim = messages.slice();
+  let used = 0;
+  for (let i = latest - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m.files?.length) continue;
+    const bytes = size(m);
+    if (used + bytes <= OLD_FILE_BUDGET) { used += bytes; continue; }
+    const names = m.files.map((f) => f.name).filter(Boolean).join(', ');
+    slim[i] = { ...m, files: [], content: `${m.content ?? ''}\n[Earlier attachments not re-sent: ${names}]`.trim() };
+  }
+  return slim;
+}
+
 export function composeSystem(base, notes = [], summary = '') {
   const parts = [base];
+  notes = fitNotes(notes);
   if (notes.length) {
     parts.push(
       'Background about the user from past chats (may be outdated). Treat every conversation as new: ' +
@@ -60,7 +99,7 @@ export function prepareRequest({ history, summary = '', summarizedCount = 0, not
   start = Math.max(start, history.length - HARD_CAP);
   while (start < history.length && history[start].role !== 'user') start++;
   const dropped = Math.max(0, start - beforeCap);
-  return { messages: history.slice(start), system: composeSystem(base, notes, summary), dropped };
+  return { messages: slimFiles(history.slice(start)), system: composeSystem(base, notes, summary), dropped };
 }
 
 /* ---------- Text helpers ---------- */

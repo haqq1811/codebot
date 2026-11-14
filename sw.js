@@ -2,7 +2,7 @@
    sw.js — makes the app open offline, and stays out of the way of the AI calls
    ========================================================================== */
 
-// Bumped after the fix pass; old v2 caches are deleted on activate.
+// Bump this number whenever you deploy new files; old studio-* caches are deleted on activate.
 const CACHE = 'studio-v10';
 
 const CORE = ['./', './index.html', './app.js', './engine.js', './storage.js', './memory.js', './style.css', './manifest.json'];
@@ -18,7 +18,10 @@ const CDN_URLS = [
 ];
 const CDN_HOSTS = new Set(['cdnjs.cloudflare.com', 'cdn.jsdelivr.net']);
 
-const NETWORK_TIMEOUT_MS = 4000;
+// Network-first keeps the app files in step with each other. A short timeout let a slow connection serve a
+// cached app.js beside a fresh engine.js; a longer one makes that mix far less likely (it can still happen
+// if one file times out while the others load, and the next normal load repairs it).
+const NETWORK_TIMEOUT_MS = 10000;
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {

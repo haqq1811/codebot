@@ -1,4 +1,4 @@
-import { keyStore, memoryStore, loadCatalogCache, saveCatalogCache, removeCatalogCache } from './storage.js';
+import { keyStore, memoryStore, settingsStore, loadCatalogCache, saveCatalogCache, removeCatalogCache } from './storage.js';
 import {
   streamChat, fetchOpenRouterModels, fetchGeminiModels, setCatalog, getCatalog,
   orderOpenRouterModels, orderGeminiModels, parseModelValue, modelValue,
@@ -18,23 +18,6 @@ const TITLE_MAX = 30;
 const STICK_THRESHOLD = 80;
 const STREAM_PAINT_MS = 100;
 const THUMB_SIZE = 192;
-
-// Code blocks with at least this many lines become a tappable card that opens a full-screen viewer.
-const ARTIFACT_MIN_LINES = 50;
-const ARTIFACT_HIGHLIGHT_MAX_LINES = 4000; // above this, skip syntax colouring so the viewer opens instantly
-const LANG_EXT = {
-  javascript: 'js', js: 'js', jsx: 'jsx', typescript: 'ts', ts: 'ts', tsx: 'tsx', python: 'py', py: 'py',
-  html: 'html', css: 'css', scss: 'scss', json: 'json', bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh',
-  java: 'java', kotlin: 'kt', c: 'c', cpp: 'cpp', 'c++': 'cpp', csharp: 'cs', cs: 'cs', go: 'go',
-  rust: 'rs', rs: 'rs', ruby: 'rb', php: 'php', swift: 'swift', sql: 'sql', yaml: 'yml', yml: 'yml',
-  xml: 'xml', svg: 'svg', markdown: 'md', md: 'md', dart: 'dart', lua: 'lua', r: 'r', toml: 'toml',
-};
-const LANG_NAME = {
-  js: 'JavaScript', javascript: 'JavaScript', ts: 'TypeScript', typescript: 'TypeScript', py: 'Python', python: 'Python',
-  html: 'HTML', css: 'CSS', json: 'JSON', bash: 'Bash', sh: 'Shell', sql: 'SQL', cpp: 'C++', 'c++': 'C++',
-  csharp: 'C#', cs: 'C#', yaml: 'YAML', yml: 'YAML', xml: 'XML', svg: 'SVG', md: 'Markdown', markdown: 'Markdown',
-};
-const KNOWN_EXT = new Set([...Object.values(LANG_EXT), 'txt']);
 
 const KIND_ICON = { image: 'image', video: 'play', audio: 'music', text: 'code', pdf: 'file', file: 'file' };
 const TEXT_EXTENSIONS = new Set([
@@ -56,7 +39,7 @@ const els = {
   searchBtn: $('search-btn'),
   userInput: $('user-input'), sendBtn: $('send-btn'), attachBtn: $('attach-btn'), fileInput: $('file-input'),
   filePreviewBar: $('file-preview-bar'), thumbStrip: $('thumb-strip'), fileNameDisplay: $('file-name-display'), removeFileBtn: $('remove-file-btn'),
-  modelSelect: $('model-select'), clearChatBtn: $('clear-chat-btn'), keyBtn: $('key-btn'),
+  modelSelect: $('model-select'), newChatTopBtn: $('new-chat-top-btn'), keyBtn: $('settings-btn'), saveTokens: $('save-tokens'),
   keyModal: $('key-modal'), apiKeyInput: $('api-key-input'), saveKeyBtn: $('save-key-btn'),
   closeKeyBtn: $('close-key-btn'), removeKeyBtn: $('remove-key-btn'), toggleKeyBtn: $('toggle-key-btn'),
   menuBtn: $('menu-btn'), sidebar: $('sidebar'), overlay: $('sidebar-overlay'), newChatBtn: $('new-chat-btn'),
@@ -68,6 +51,7 @@ const state = {
   webSearch: false,
   sessionId: newId(), generating: false, abort: null,
   summary: '', summarizedCount: 0, notesCursor: 0, memoryBusy: false, memoryRerun: false,
+  version: 0, upkeepBackoff: 0,
 };
 
 let nextAttachmentId = 0, stickToBottom = true, toastTimer = 0, lastFocus = null;
@@ -115,9 +99,10 @@ async function copyText(text) {
   } catch { return false; }
 }
 function makeThrottle(fn, wait) {
-  let timer = 0, last = performance.now() - wait;
+  const gap = () => (typeof wait === 'function' ? wait() : wait);
+  let timer = 0, last = performance.now() - gap();
   const run = () => { timer = 0; last = performance.now(); fn(); };
-  const throttled = () => { if (timer) return; const delay = Math.max(0, wait - (performance.now() - last)); timer = setTimeout(run, delay); };
+  const throttled = () => { if (timer) return; const delay = Math.max(0, gap() - (performance.now() - last)); timer = setTimeout(run, delay); };
   throttled.cancel = () => { clearTimeout(timer); timer = 0; };
   return throttled;
 }
@@ -153,9 +138,11 @@ function renderModelDropdown() {
   // Only use the live catalog or the saved cache. No more hardcoded fallbacks.
   const pick = (p) => getCatalog(p).length ? getCatalog(p) : (cached[p]?.models ?? []);
   
+  const router = pick('openrouter');
   const groups = [
     { provider: 'gemini', label: 'Google AI Studio', models: pick('gemini') },
-    { provider: 'openrouter', label: 'OpenRouter', models: pick('openrouter') },
+    { provider: 'openrouter', label: 'OpenRouter: free', models: router.filter((m) => m.free === true) },
+    { provider: 'openrouter', label: 'OpenRouter: paid', models: router.filter((m) => m.free !== true) },
   ];
   groups.sort((a, b) => Number(Boolean(keys[b.provider])) - Number(Boolean(keys[a.provider])));
 
@@ -176,7 +163,7 @@ function renderModelDropdown() {
 
   // If we have absolutely no models (e.g., no key, offline, first load)
   if (totalModels === 0) {
-    const placeholder = el('option', '', keys.gemini || keys.openrouter ? 'Loading models...' : 'Add API Key to load models');
+    const placeholder = el('option', '', keys.gemini || keys.openrouter ? 'Loading models…' : 'Add an API key');
     placeholder.disabled = true;
     placeholder.selected = true;
     select.append(placeholder);
@@ -194,12 +181,18 @@ function openKeyModal() {
   for (const [p, input] of Object.entries(keyInputs)) { if (!input) continue; input.value = keys[p] || ''; input.type = 'password'; }
   els.toggleKeyBtn.textContent = 'Show'; els.toggleKeyBtn.setAttribute('aria-pressed', 'false');
   els.removeKeyBtn.hidden = !(keys.gemini || keys.openrouter);
+  els.saveTokens.checked = settingsStore.load().saveTokens;
+  if (!desktopMQ.matches) setSidebar(false);
   els.keyModal.hidden = false; keyInputs.gemini?.focus();
 }
 function closeKeyModal() { els.keyModal.hidden = true; lastFocus?.focus?.(); lastFocus = null; }
 async function saveKey() {
+  const before = JSON.stringify(keyStore.all());
+  settingsStore.save({ saveTokens: els.saveTokens.checked });
   for (const [p, input] of Object.entries(keyInputs)) { if (!input) continue; const v = input.value.trim(); if (v) keyStore.set(p, v); else keyStore.remove(p); }
-  closeKeyModal(); toast('Updating model lists…');
+  closeKeyModal();
+  if (JSON.stringify(keyStore.all()) === before) { toast('Settings saved.'); return; }
+  toast('Updating model lists…');
   const errors = await refreshCatalogs({ force: true }); syncEmptyState();
   const rejected = Object.entries(errors).find(([, err]) => [400, 401, 403].includes(Number(err?.status)));
   const offline = Object.values(errors).some((err) => err instanceof TypeError || /failed to fetch|network/i.test(err?.message ?? ''));
@@ -392,8 +385,6 @@ function enhanceContent(root) {
   root.querySelectorAll('pre').forEach((pre) => {
     if (pre.parentElement.classList.contains('code-block')) return;
     const code = pre.querySelector('code'), lang = code?.className.match(/language-([\w+#-]+)/)?.[1] || '';
-    const source = (code ?? pre).textContent;
-    if (countLines(source) >= ARTIFACT_MIN_LINES) { pre.replaceWith(buildArtifactCard(source, lang.toLowerCase())); return; }
     if (code) highlightCode(code, lang);
     const copy = el('button', 'copy-btn', 'Copy'); copy.type = 'button'; copy.setAttribute('aria-label', 'Copy code');
     copy.addEventListener('click', async () => {
@@ -409,95 +400,6 @@ function enhanceContent(root) {
     const wrap = el('div', 'table-wrap'); table.replaceWith(wrap); wrap.append(table);
   });
 }
-/* ---------- Code artifacts: long code becomes a card; tapping it opens a viewer ---------- */
-const countLines = (text) => text.replace(/\n+$/, '').split('\n').length;
-const avEls = {
-  root: $('artifact-viewer'), title: $('av-title'), sub: $('av-sub'), body: $('av-body'), gutter: $('av-gutter'), pre: $('av-pre'),
-  close: $('av-close'), more: $('av-more'), menu: $('av-menu'),
-  download: $('av-download'), share: $('av-share'), copy: $('av-copy'),
-};
-let currentArtifact = null, artifactFocus = null;
-
-// Looks for a name like "// app.js" or "# utils.py" in the first lines; otherwise falls back to code.<ext>.
-function guessFilename(source, lang) {
-  for (const line of source.split('\n', 3)) {
-    const m = /^\s*(?:\/\/|#!?|\/\*+|<!--|--|;)\s*(?:file(?:name)?\s*:\s*)?(\w[\w./-]{0,60}\.([A-Za-z0-9]{1,6}))(?:\s|$)/i.exec(line);
-    if (m && KNOWN_EXT.has(m[2].toLowerCase())) return { name: m[1].split('/').pop(), detected: true };
-  }
-  return { name: `code.${LANG_EXT[lang] || 'txt'}`, detected: false };
-}
-function langLabel(lang) { return LANG_NAME[lang] || (lang ? lang[0].toUpperCase() + lang.slice(1) : 'Code'); }
-
-function buildArtifactCard(source, lang) {
-  const text = source.replace(/\n+$/, '');
-  const file = guessFilename(text, lang), label = langLabel(lang);
-  const av = { source: text, lang, lines: countLines(text), filename: file.name, title: file.detected ? file.name : `${label} code`, label };
-  const card = el('button', 'artifact-card'); card.type = 'button'; card.setAttribute('aria-label', `Open ${av.title}, ${av.lines} lines`);
-  const iconBox = el('span', 'ac-icon'); iconBox.append(icon('code'));
-  const info = el('span', 'ac-text');
-  info.append(el('span', 'ac-title', av.title), el('span', 'ac-sub', `${label} · ${av.lines} lines · Tap to open`));
-  card.append(iconBox, info);
-  card.addEventListener('click', () => openArtifact(av));
-  return card;
-}
-
-function openArtifact(av) {
-  currentArtifact = av; artifactFocus = document.activeElement;
-  avEls.title.textContent = av.title; avEls.sub.textContent = `${av.label} · ${av.lines} lines`;
-  const code = el('code'); if (av.lang) code.className = `language-${av.lang}`; code.textContent = av.source;
-  if (av.lines <= ARTIFACT_HIGHLIGHT_MAX_LINES) highlightCode(code, av.lang);
-  avEls.pre.replaceChildren(code);
-  avEls.gutter.textContent = Array.from({ length: av.lines }, (_, i) => i + 1).join('\n');
-  avEls.body.scrollTop = 0; avEls.body.scrollLeft = 0;
-  closeAvMenu(); avEls.root.hidden = false;
-  history.pushState({ av: 1 }, ''); // so the phone's Back gesture closes the viewer instead of leaving the app
-  avEls.close.focus({ preventScroll: true });
-}
-function closeArtifact({ fromPop = false } = {}) {
-  if (avEls.root.hidden) return;
-  avEls.root.hidden = true; closeAvMenu(); currentArtifact = null;
-  avEls.pre.replaceChildren(); avEls.gutter.textContent = '';
-  if (!fromPop && history.state?.av) history.back();
-  artifactFocus?.focus?.({ preventScroll: true }); artifactFocus = null;
-}
-function closeAvMenu() { avEls.menu.hidden = true; avEls.more.setAttribute('aria-expanded', 'false'); }
-function toggleAvMenu() {
-  const open = avEls.menu.hidden; avEls.menu.hidden = !open; avEls.more.setAttribute('aria-expanded', String(open));
-}
-
-function downloadArtifact() {
-  const av = currentArtifact; if (!av) return;
-  const url = URL.createObjectURL(new Blob([av.source], { type: 'text/plain;charset=utf-8' }));
-  const a = el('a'); a.href = url; a.download = av.filename; a.hidden = true;
-  document.body.append(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
-  toast(`Download started: ${av.filename}`);
-}
-async function shareArtifact() {
-  const av = currentArtifact; if (!av) return;
-  try {
-    const file = new File([av.source], av.filename, { type: 'text/plain' });
-    if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: av.filename });
-    else if (navigator.share) await navigator.share({ title: av.filename, text: av.source });
-    else { await copyText(av.source); toast('Sharing not supported. Copied instead.'); }
-  } catch (err) { if (err?.name !== 'AbortError') toast('Could not share.'); }
-}
-async function copyArtifact() {
-  if (!currentArtifact) return;
-  toast((await copyText(currentArtifact.source)) ? 'Code copied.' : 'Copy failed.');
-}
-function wireArtifactViewer() {
-  avEls.close.addEventListener('click', () => closeArtifact());
-  avEls.more.addEventListener('click', toggleAvMenu);
-  avEls.download.addEventListener('click', () => { closeAvMenu(); downloadArtifact(); });
-  avEls.share.addEventListener('click', () => { closeAvMenu(); shareArtifact(); });
-  avEls.copy.addEventListener('click', () => { closeAvMenu(); copyArtifact(); });
-  document.addEventListener('pointerdown', (e) => {
-    if (!avEls.menu.hidden && !avEls.menu.contains(e.target) && !avEls.more.contains(e.target)) closeAvMenu();
-  });
-  window.addEventListener('popstate', () => closeArtifact({ fromPop: true }));
-}
-
 function createMessage(role) {
   const msg = el('div', `msg ${role}`); els.chatBox.append(msg); els.emptyState.hidden = true; return msg;
 }
@@ -535,7 +437,7 @@ function enableLongPress(node, text, index) {
   node.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' || node.classList.contains('is-editing')) return;
     sx = e.clientX; sy = e.clientY; fired = false;
-    timer = setTimeout(() => { fired = true; navigator.vibrate?.(15); showContextMenu(sx, sy, text, index, node); }, 450);
+    timer = setTimeout(() => { fired = true; showContextMenu(sx, sy, text, index, node); }, 450);
   });
   node.addEventListener('pointermove', (e) => { if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 12) cancel(); });
   ['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => node.addEventListener(t, cancel));
@@ -647,13 +549,24 @@ function syncSendState() {
   const empty = !els.userInput.value.trim() && state.attachments.length === 0;
   els.sendBtn.classList.toggle('is-idle', empty && !state.generating);
 }
-function popSend() {
-  const b = els.sendBtn; b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
-}
 function stopGeneration() { state.abort?.abort(); }
 function ensureKeyFor(provider) {
   if (keyStore.get(provider)) return true;
   toast(`Add your ${PROVIDER_NAMES[provider]} API key.`, 4000); openKeyModal(); return false;
+}
+
+function currentSelection() {
+  const value = els.modelSelect.value;
+  return value ? parseModelValue(value) : null;
+}
+// Returns the selected model, or null after telling the user what is missing.
+function requireSelection() {
+  const selected = currentSelection();
+  if (selected) return selected;
+  const keys = keyStore.all();
+  if (keys.gemini || keys.openrouter) toast('Models are still loading. Try again in a moment.', 3500);
+  else { toast('Add an API key to get started.', 3500); openKeyModal(); }
+  return null;
 }
 
 async function sendMessage() {
@@ -665,12 +578,14 @@ async function sendMessage() {
   if (!text && state.attachments.length === 0) return;
   if (!navigator.onLine) { toast("You're offline.", 4500); return; }
 
-  const selected = parseModelValue(els.modelSelect.value);
-  if (!ensureKeyFor(selected.provider)) return;
+  const selected = requireSelection();
+  if (!selected || !ensureKeyFor(selected.provider)) return;
 
   const files = state.attachments.map(({ name, size, kind, ext, mime, thumb, data, text: fileText }) => ({ name, size, kind, ext, mime, thumb, data, text: fileText }));
   const message = { role: 'user', content: text, files: files.map(({ thumb, ...req }) => req) };
-  if (estimateBytes([...state.history, message]) > MAX_INLINE_BYTES) { toast('Request over 19 MB limit.', 5000); return; }
+  // Measure what would really be sent (older attachments are trimmed), not the whole stored history.
+  const probe = prepareRequest({ history: [...state.history, message], summary: state.summary, summarizedCount: state.summarizedCount, base: '' }).messages;
+  if (estimateBytes(probe) > MAX_INLINE_BYTES) { toast('Request over 19 MB limit.', 5000); return; }
 
   const ui = { role: 'user', text, files: files.map(({ name, size, kind, ext, thumb }) => ({ name, size, kind, ext, thumb })) };
 
@@ -682,11 +597,13 @@ async function sendMessage() {
 function canRun() {
   if (state.generating) { toast('Wait for the current response or press Stop.'); return false; }
   if (!navigator.onLine) { toast("You're offline."); return false; }
-  return ensureKeyFor(parseModelValue(els.modelSelect.value).provider);
+  const selected = requireSelection();
+  return Boolean(selected) && ensureKeyFor(selected.provider);
 }
 
 // Drop everything from the user message at userIndex onward.
 function rewindTo(userIndex) {
+  state.version++; // tells a running background summary that its view of the chat is out of date
   state.history = state.history.slice(0, userIndex);
   state.ui = state.ui.slice(0, userIndex);
   // A summary stays valid as long as it only covers messages that still exist.
@@ -699,6 +616,7 @@ async function retryFrom(targetIndex) {
   let userIndex = Math.min(targetIndex, state.history.length - 1);
   while (userIndex >= 0 && state.history[userIndex]?.role !== 'user') userIndex--;
   if (userIndex < 0) return;
+  if (state.history.length > userIndex + 2 && !confirm('Retrying removes the replies after this message. Continue?')) return;
 
   const message = state.history[userIndex];
   const ui = state.ui[userIndex] ?? { role: 'user', text: message.content, files: [] };
@@ -720,7 +638,23 @@ async function editFrom(index, newText) {
   await runTurn(turn);
 }
 
-// Swap the bubble's text for an editor. Sending rewrites the chat from this message onward.
+// Changes a sent message without touching the replies. Returns false when the edit is not allowed.
+function saveEditInPlace(index, newText) {
+  const msg = state.history[index];
+  if (msg?.role !== 'user') return false;
+  const text = newText.trim();
+  if (!text && !msg.files?.length) { toast('A message needs some text or a file.'); return false; }
+  msg.content = text;
+  if (state.ui[index]) state.ui[index].text = text;
+  state.version++;
+  if (state.summarizedCount > index) { state.summarizedCount = 0; state.summary = ''; }
+  state.notesCursor = Math.min(state.notesCursor, index);
+  saveCurrentSession();
+  return true;
+}
+
+// Swap the bubble's text for an editor.
+// Save only changes the message. Save & resend also removes the replies after it and asks again.
 function beginEdit(node, index) {
   if (!node || node.classList.contains('is-editing')) return;
   if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
@@ -730,18 +664,32 @@ function beginEdit(node, index) {
   const grow = () => { area.style.height = 'auto'; area.style.height = `${Math.min(area.scrollHeight, 260)}px`; };
   const bar = el('div', 'edit-actions');
   const cancel = el('button', 'pill-btn', 'Cancel'); cancel.type = 'button';
-  const send = el('button', 'pill-btn pill-primary', 'Send'); send.type = 'button';
+  const save = el('button', 'pill-btn', 'Save'); save.type = 'button';
+  const resend = el('button', 'pill-btn pill-primary', 'Save & resend'); resend.type = 'button';
   const close = () => { area.remove(); bar.remove(); if (textEl) textEl.hidden = false; node.classList.remove('is-editing'); };
+  const doSave = () => {
+    if (!saveEditInPlace(index, area.value)) return;
+    const text = area.value.trim();
+    let shown = node.querySelector('.msg-text');
+    if (text && !shown) { shown = el('span', 'msg-text'); area.before(shown); }
+    if (shown) { shown.textContent = text; if (!text) shown.remove(); }
+    close(); toast('Message updated.');
+  };
+  const doResend = () => {
+    if (state.history.length > index + 2 && !confirm('This removes the replies after this message. Continue?')) return;
+    editFrom(index, area.value);
+  };
   cancel.addEventListener('click', close);
-  send.addEventListener('click', () => editFrom(index, area.value));
+  save.addEventListener('click', doSave);
+  resend.addEventListener('click', doResend);
   area.addEventListener('input', grow);
   area.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.stopPropagation(); close(); }
-    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); editFrom(index, area.value); }
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doResend(); }
   });
   if (textEl) textEl.hidden = true;
   node.classList.add('is-editing');
-  bar.append(cancel, send); node.append(area, bar);
+  bar.append(cancel, save, resend); node.append(area, bar);
   grow(); area.focus(); area.setSelectionRange(area.value.length, area.value.length);
   node.scrollIntoView({ block: 'nearest' });
 }
@@ -756,7 +704,7 @@ async function runTurn(turn) {
   state.history.push(turn.message);
   state.ui.push(turn.ui);
 
-  const selected = parseModelValue(els.modelSelect.value);
+  const selected = currentSelection();
   const used = { provider: selected.provider, model: selected.id };
 
   const bubble = createMessage('ai');
@@ -764,18 +712,8 @@ async function runTurn(turn) {
 
   const result = { text: '', thoughts: '', model: used.model, finishReason: '', usage: null };
   const t0 = performance.now(); let firstMs = 0, answerMs = 0;
-  const paint = makeThrottle(() => { renderAssistant(bubble, result); scrollToBottom(); }, STREAM_PAINT_MS);
-
-  // Once a fallback model actually answers, make it the selected model so later sends start there.
-  let synced = false;
-  const syncModel = () => {
-    if (synced) return; synced = true;
-    const value = modelValue(used.provider, used.model);
-    if (value !== els.modelSelect.value && modelIds().includes(value)) {
-      els.modelSelect.value = value; store.set(STORAGE.model, value);
-      toast(`Now using ${used.model}`, 3000);
-    }
-  };
+  // Long answers are re-parsed on every paint, so the gap grows with the length (100ms up to 400ms).
+  const paint = makeThrottle(() => { renderAssistant(bubble, result); scrollToBottom(); }, () => Math.min(400, STREAM_PAINT_MS + Math.floor(result.text.length / 40)));
 
   let failure = null;
   try {
@@ -792,7 +730,8 @@ async function runTurn(turn) {
       selected, 
       keys: keyStore.all(), 
       signal, 
-      webSearch: state.webSearch 
+      webSearch: state.webSearch,
+      effort: settingsStore.load().saveTokens ? 'lean' : 'full' 
     });
 
     for await (const chunk of stream) {
@@ -801,9 +740,9 @@ async function runTurn(turn) {
         if (!result.text && !result.thoughts) setThinking(bubble, chunk.model);
       } else if (chunk.type === 'text') {
         if (!firstMs) firstMs = performance.now() - t0; if (!answerMs) answerMs = performance.now() - t0;
-        syncModel(); result.text += chunk.delta; paint();
+        result.text += chunk.delta; paint();
       } else if (chunk.type === 'thought') {
-        if (!firstMs) firstMs = performance.now() - t0; syncModel(); result.thoughts += chunk.delta; paint();
+        if (!firstMs) firstMs = performance.now() - t0; result.thoughts += chunk.delta; paint();
       } else if (chunk.type === 'usage') result.usage = chunk;
       else if (chunk.type === 'fallback') toast(`Switched from ${chunk.from.model} to ${chunk.to.model}`, 4500);
       else if (chunk.type === 'notice') toast(chunk.message, 4000);
@@ -839,8 +778,7 @@ function showError(bubble, turn, msgIndex, err) {
   const bar = el('div', 'msg-actions'), btn = el('button'); btn.type = 'button';
   btn.append(icon('refresh'), document.createTextNode('Retry'));
   btn.addEventListener('click', () => {
-    if (state.generating) { toast('Wait for the current response or press Stop.'); return; }
-    if (!navigator.onLine) { toast("You're offline."); return; }
+    if (!canRun()) return;
     if (bubble.nextElementSibling) { toast('Only the latest failed message can be retried.'); return; }
     const prev = bubble.previousElementSibling;
     bubble.remove(); if (prev?.classList.contains('user')) prev.remove();
@@ -889,6 +827,21 @@ const dbPutSession = (rec) => dbRun(STORE_SESSIONS, 'readwrite', (s) => s.put(re
 const dbDeleteSession = (id) => dbRun(STORE_SESSIONS, 'readwrite', (s) => s.delete(id));
 const dbPutAttachment = (rec) => dbRun(STORE_ATTACHMENTS, 'readwrite', (s) => s.put(rec));
 const dbGetAttachment = (id) => dbRun(STORE_ATTACHMENTS, 'readonly', (s) => s.get(id));
+const dbDeleteAttachment = (id) => dbRun(STORE_ATTACHMENTS, 'readwrite', (s) => s.delete(id));
+
+// Every attachment / thumbnail row a saved chat points to.
+function attachmentIdsOf(session) {
+  const ids = new Set();
+  for (const m of session?.messages ?? []) for (const f of m.files ?? []) if (f.attachmentId) ids.add(f.attachmentId);
+  for (const m of session?.ui ?? []) for (const f of m.files ?? []) if (f.thumbId) ids.add(f.thumbId);
+  return ids;
+}
+async function dropAttachments(ids) {
+  for (const id of ids) {
+    try { await dbDeleteAttachment(id); } catch (err) { console.warn('Could not delete attachment:', err); }
+    persistedAttachments.delete(id);
+  }
+}
 
 async function dbListSessions() {
   const db = await dbPromise; if (!db) return [];
@@ -954,12 +907,16 @@ async function saveCurrentSession() {
     const title = makeTitle(cleanUi);
     // Saves run one at a time so an older snapshot can never land after a newer one.
     const job = saveChain.then(async () => {
+      const previous = await dbGetSession(snapId).catch(() => null);
       for (const att of attachmentsToSave) { await dbPutAttachment(att); persistedAttachments.add(att.id); }
       await dbPutSession({
         id: snapId, title, messages: cleanHistory, ui: cleanUi,
         summary: snapSummary, summarizedCount: snapCount, notesCursor: snapCursor,
         timestamp: Date.now(),
       });
+      // Messages removed by an edit or retry no longer need their stored files.
+      const keep = attachmentIdsOf({ messages: cleanHistory, ui: cleanUi });
+      await dropAttachments([...attachmentIdsOf(previous)].filter((id) => !keep.has(id)));
     });
     saveChain = job.catch(() => {});
     await job;
@@ -985,7 +942,7 @@ async function renderHistoryList() {
 }
 
 function resetConversation() {
-  state.sessionId = newId(); state.history = []; state.ui = [];
+  state.sessionId = newId(); state.history = []; state.ui = []; state.version++;
   state.summary = ''; state.summarizedCount = 0; state.notesCursor = 0;
   clearAttachments(); clearTranscript();
 }
@@ -1023,7 +980,10 @@ async function loadSession(id) {
 async function deleteSession(id) {
   if (busyGuard()) return; if (!confirm('Delete this chat?')) return;
   await saveChain; // let any pending save land first so it can't re-create the chat after deletion
+  let doomed = new Set();
+  try { doomed = attachmentIdsOf(await dbGetSession(id)); } catch (err) { console.warn(err); }
   try { await dbDeleteSession(id); } catch (err) { console.warn(err); }
+  await dropAttachments(doomed);
   if (id === state.sessionId) resetConversation();
   renderHistoryList();
 }
@@ -1031,14 +991,6 @@ function startNewChat() {
   if (busyGuard()) return; if (state.history.length || state.ui.length) resetConversation();
   if (!desktopMQ.matches) setSidebar(false); renderHistoryList(); els.userInput.focus();
 }
-async function clearChat() {
-  if (busyGuard()) return; if (state.history.length && !confirm('Clear this conversation?')) return;
-  const id = state.sessionId; resetConversation();
-  await saveChain;
-  try { await dbDeleteSession(id); } catch (err) { console.warn(err); }
-  renderHistoryList();
-}
-
 const desktopMQ = window.matchMedia('(min-width: 900px)');
 function isSidebarOpen() {
   return desktopMQ.matches ? !document.body.classList.contains('sidebar-collapsed') : els.sidebar.classList.contains('open');
@@ -1054,7 +1006,7 @@ function syncSidebarToViewport() {
   els.menuBtn.setAttribute('aria-expanded', String(isSidebarOpen()));
 }
 
-function autoGrow() { els.userInput.style.height = 'auto'; els.userInput.style.height = `${Math.min(els.userInput.scrollHeight, 200)}px`; syncSendState(); }
+function autoGrow() { els.userInput.style.height = 'auto'; els.userInput.style.height = `${Math.min(els.userInput.scrollHeight, 160)}px`; syncSendState(); }
 
 function trackViewport() {
   const vv = window.visualViewport; if (!vv) return;
@@ -1072,23 +1024,36 @@ function wireDragAndDrop() {
   window.addEventListener('dragleave', (e) => { if (hasFiles(e) && --depth <= 0) reset(); });
   window.addEventListener('drop', (e) => { if (!hasFiles(e)) return; e.preventDefault(); reset(); addFiles(e.dataTransfer.files); });
 }
+const UPKEEP_TIMEOUT_MS = 90_000;
+const UPKEEP_BACKOFF_MS = 5 * 60_000;
+
 async function runMemoryUpkeep() {
+  if (Date.now() < state.upkeepBackoff) return; // a recent helper failure: don't retry on every message
   if (state.memoryBusy) { state.memoryRerun = true; return; }
+  const keys = keyStore.all(), memory = memoryStore.load();
+  const helper = pickHelperModel(keys);
+  if (!helper) return; // no cheap model known: skip rather than spend the model the user picked
   state.memoryBusy = true;
-  const snap = { id: state.sessionId, history: state.history.slice(), summary: state.summary, summarizedCount: state.summarizedCount, notesCursor: state.notesCursor };
+  const snap = { id: state.sessionId, version: state.version, history: state.history.slice(), summary: state.summary, summarizedCount: state.summarizedCount, notesCursor: state.notesCursor };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), UPKEEP_TIMEOUT_MS); // really cancels the requests, so two runs never overlap
   try {
-    const keys = keyStore.all(), memory = memoryStore.load(), helper = pickHelperModel(keys, parseModelValue(els.modelSelect.value));
-    const upkeep = maintain({
+    const { errors } = await maintain({
       history: snap.history, summary: snap.summary, summarizedCount: snap.summarizedCount, notesCursor: snap.notesCursor,
       notes: memory.notes, notesEnabled: memory.enabled,
-      complete: (system, prompt) => completeOnce({ system, prompt, selected: helper, keys }),
+      complete: (system, prompt) => completeOnce({ system, prompt, selected: helper, keys, signal: ctrl.signal }),
       onStep: (changes) => applyMemoryChanges(snap, changes),
-    }).catch((err) => ({ changes: {}, errors: [err] }));
-    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 90_000));
-    const { errors } = await Promise.race([upkeep, timeout]);
+    });
     errors.forEach((err) => console.warn('[memory] step failed:', err));
-  } catch (err) { console.warn('[memory] upkeep failed:', err); }
-  finally { state.memoryBusy = false; if (state.memoryRerun) { state.memoryRerun = false; runMemoryUpkeep(); } }
+    if (errors.length) state.upkeepBackoff = Date.now() + UPKEEP_BACKOFF_MS;
+  } catch (err) {
+    console.warn('[memory] upkeep failed:', err);
+    state.upkeepBackoff = Date.now() + UPKEEP_BACKOFF_MS;
+  } finally {
+    clearTimeout(timer);
+    state.memoryBusy = false;
+    if (state.memoryRerun) { state.memoryRerun = false; runMemoryUpkeep(); }
+  }
 }
 
 async function applyMemoryChanges(snap, changes) {
@@ -1096,7 +1061,8 @@ async function applyMemoryChanges(snap, changes) {
     const fresh = memoryStore.load(); memoryStore.save({ ...fresh, notes: mergeNotes(fresh.notes, changes.addedNotes) });
     if (!memoryEls.modal.hidden) renderMemoryModal();
   }
-  if (state.sessionId !== snap.id) return;
+  // A summary only fits the chat it was written for; an edit, retry or chat switch makes it stale.
+  if (state.sessionId !== snap.id || state.version !== snap.version) return;
   let dirty = false;
   if (changes.summary !== undefined) { state.summary = changes.summary; state.summarizedCount = changes.summarizedCount; dirty = true; }
   if (changes.notesCursor !== undefined) { state.notesCursor = changes.notesCursor; dirty = true; }
@@ -1148,10 +1114,8 @@ function init() {
   els.ctxRetry.addEventListener('click', () => { els.ctxMenu.hidden = true; retryFrom(ctxTargetIndex); });
   els.ctxEdit.addEventListener('click', () => { els.ctxMenu.hidden = true; beginEdit(ctxNode, ctxTargetIndex); });
 
-  els.sendBtn.addEventListener('pointerdown', () => navigator.vibrate?.(8));
   els.sendBtn.addEventListener('click', () => {
     if (state.generating) { stopGeneration(); return; }
-    if (!els.sendBtn.classList.contains('is-idle')) popSend();
     sendMessage();
   });
   els.userInput.addEventListener('input', autoGrow);
@@ -1160,7 +1124,6 @@ function init() {
     const touch = window.matchMedia('(pointer: coarse)').matches;
     if (e.ctrlKey || e.metaKey || (!e.shiftKey && !touch)) {
       e.preventDefault();
-      if (!state.generating && !els.sendBtn.classList.contains('is-idle')) popSend();
       sendMessage();
     }
   });
@@ -1169,14 +1132,19 @@ function init() {
   els.searchBtn.addEventListener('click', () => {
     state.webSearch = !state.webSearch;
     els.searchBtn.classList.toggle('active', state.webSearch);
-    toast(state.webSearch ? 'Web search enabled.' : 'Web search disabled.');
+    els.searchBtn.setAttribute('aria-pressed', String(state.webSearch));
+    toast(state.webSearch ? 'Web search is on for your messages.' : 'Web search is off.');
   });
+
+  document.querySelectorAll('.suggestion').forEach((btn) => btn.addEventListener('click', () => {
+    els.userInput.value = btn.dataset.prompt ?? ''; autoGrow(); els.userInput.focus();
+  }));
 
   els.attachBtn.addEventListener('click', () => els.fileInput.click());
   els.fileInput.addEventListener('change', () => { addFiles(els.fileInput.files); els.fileInput.value = ''; });
   els.removeFileBtn.addEventListener('click', clearAttachments); wireDragAndDrop();
 
-  els.clearChatBtn.addEventListener('click', clearChat); els.keyBtn.addEventListener('click', openKeyModal); els.emptyKeyBtn.addEventListener('click', openKeyModal);
+  els.newChatTopBtn.addEventListener('click', startNewChat); els.keyBtn.addEventListener('click', openKeyModal); els.emptyKeyBtn.addEventListener('click', openKeyModal);
   els.saveKeyBtn.addEventListener('click', saveKey); els.closeKeyBtn.addEventListener('click', closeKeyModal); els.removeKeyBtn.addEventListener('click', removeKey);
   Object.values(keyInputs).forEach((input) => { input?.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveKey(); }); });
   els.toggleKeyBtn.addEventListener('click', () => {
@@ -1184,16 +1152,14 @@ function init() {
     Object.values(keyInputs).forEach((i) => { if (i) i.type = show ? 'text' : 'password'; });
     els.toggleKeyBtn.textContent = show ? 'Hide' : 'Show'; els.toggleKeyBtn.setAttribute('aria-pressed', String(show));
   });
-  els.keyModal.addEventListener('click', (e) => { if (e.target === els.keyModal) closeKeyModal(); }); wireMemoryModal(); wireArtifactViewer();
+  els.keyModal.addEventListener('click', (e) => { if (e.target === els.keyModal) closeKeyModal(); }); wireMemoryModal();
 
   els.menuBtn.addEventListener('click', () => setSidebar(!isSidebarOpen())); els.overlay.addEventListener('click', () => setSidebar(false));
   els.newChatBtn.addEventListener('click', startNewChat); desktopMQ.addEventListener('change', syncSidebarToViewport); syncSidebarToViewport();
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!avEls.menu.hidden) closeAvMenu();
-    else if (!avEls.root.hidden) closeArtifact();
-    else if (!els.keyModal.hidden) closeKeyModal();
+    if (!els.keyModal.hidden) closeKeyModal();
     else if (!memoryEls.modal.hidden) closeMemoryModal();
     else if (!desktopMQ.matches && isSidebarOpen()) setSidebar(false);
     else if (!els.ctxMenu.hidden) els.ctxMenu.hidden = true;

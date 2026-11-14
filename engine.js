@@ -15,18 +15,22 @@ export const DEFAULT_SYSTEM_PROMPT =
   'You are a helpful, accurate assistant. Reply in clean Markdown. ' +
   'Put code in fenced blocks and always label the language, for example ```python.';
 
-const GEMINI_FREE_TIER = new Set([
-  'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
-  'gemini-2.0-flash', 'gemini-2.0-flash-lite',
-  'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro',
-]);
-const GEMINI_PAID_ONLY = new Set([]);
+// Flash and Flash-Lite models have a free tier. Google changes the details per model and account,
+// so this is a pattern-based hint (works for new versions too) instead of a list that goes stale.
+const isGeminiFree = (id) => /^gemini-\d+(?:\.\d+)?-flash(?:-lite)?(?:-\d{2,3})?$/.test(id);
+
+// How hard a request may think / how long it may answer. 'lean' is the default; 'full' = no caps;
+// 'helper' is for background summaries and notes.
+const EFFORT = {
+  full: { thinking: 'default', maxTokens: 0, reasoning: '' },
+  lean: { thinking: 'low', maxTokens: 8192, reasoning: 'low' },
+  helper: { thinking: 'off', maxTokens: 2048, reasoning: 'low' },
+};
+const CHAT_TIMEOUT_MS = 60_000; // covers waiting for the first response; slow free models need it
 
 export function pricingTag(provider, model) {
   if (provider === 'openrouter') return model.free === true ? ' (Free)' : model.free === false ? ' (Paid)' : '';
-  if (GEMINI_FREE_TIER.has(model.id)) return ' (Free tier)';
-  if (GEMINI_PAID_ONLY.has(model.id)) return ' (Paid)';
-  return '';
+  return isGeminiFree(model.id) ? ' (Free tier)' : '';
 }
 
 export const modelValue = (provider, id) => `${provider}:${id}`;
@@ -90,7 +94,7 @@ export function orderGeminiModels(models) {
   const rank = (id) => {
     const v = /^gemini-(\d+(?:\.\d+)?)/.exec(id);
     return {
-      cost: GEMINI_FREE_TIER.has(id) ? 0 : GEMINI_PAID_ONLY.has(id) ? 2 : 1,
+      cost: isGeminiFree(id) ? 0 : 1,
       version: v ? parseFloat(v[1]) : 0,
       preview: /preview|exp/.test(id) ? 1 : 0,
       tier: /flash-lite/.test(id) ? 1 : /flash/.test(id) ? 0 : /pro/.test(id) ? 2 : 3,
@@ -201,30 +205,45 @@ function toGeminiContents(messages) {
   return contents;
 }
 
-async function* streamGemini({ model, apiKey, messages, system, signal, webSearch }) {
-  let includeThoughts = true;
+function geminiThinkingConfig(model, mode) {
+  const cfg = {};
+  if (mode !== 'off') cfg.includeThoughts = true; // background helpers never need to show thoughts
+  if (mode === 'default') return cfg;
+  // 2.5 Pro cannot switch thinking off (minimum 128). Flash-Lite doesn't think unless asked, so it is left alone.
+  const g25 = /^gemini-2\.5-(flash|pro)(?!-lite)/.exec(model);
+  if (g25) cfg.thinkingBudget = mode === 'off' ? (g25[1] === 'pro' ? 128 : 0) : 1024;
+  else if (/^gemini-[3-9]/.test(model)) cfg.thinkingLevel = 'low';
+  return cfg;
+}
+
+async function* streamGemini({ model, apiKey, messages, system, signal, webSearch, effort }) {
+  let useThinking = true;
   let res;
   for (;;) {
     const body = { contents: toGeminiContents(messages) };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
-    if (includeThoughts) body.generationConfig = { thinkingConfig: { includeThoughts: true } };
-    
-    if (webSearch) {
-      body.tools = [{ googleSearch: {} }];
+    const gen = {};
+    if (effort.maxTokens) gen.maxOutputTokens = effort.maxTokens;
+    if (useThinking) {
+      const thinking = geminiThinkingConfig(model, effort.thinking);
+      if (Object.keys(thinking).length) gen.thinkingConfig = thinking;
     }
+    if (Object.keys(gen).length) body.generationConfig = gen;
+    if (webSearch) body.tools = [{ googleSearch: {} }];
 
     res = await fetchWithTimeout(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify(body),
       signal,
+      timeout: CHAT_TIMEOUT_MS,
     });
-    
+
     if (res.ok) break;
     const err = await httpError(res);
-    if (includeThoughts && err.status === 400 &&
-        /thinkingConfig|includeThoughts|thinking (?:is )?not supported|does not support thinking/i.test(err.message)) {
-      includeThoughts = false;
+    if (useThinking && err.status === 400 &&
+        /thinkingConfig|includeThoughts|thinkingBudget|thinkingLevel|thinking (?:is )?not supported|does not support thinking/i.test(err.message)) {
+      useThinking = false; // this model rejects the thinking settings: retry once without them
       continue;
     }
     throw err;
@@ -300,14 +319,14 @@ function toOpenRouterMessages(messages, system) {
   return { messages: out, skipped: [...new Set(skipped)] };
 }
 
-async function* streamOpenRouter({ model, apiKey, messages, system, signal, webSearch }) {
+async function* streamOpenRouter({ model, apiKey, messages, system, signal, webSearch, effort }) {
   const { messages: body, skipped } = toOpenRouterMessages(messages, system);
   if (skipped.length) yield { type: 'notice', message: `OpenRouter skipped files it can't read: ${skipped.join(', ')}` };
 
   const payload = { model, messages: body, stream: true };
-  if (webSearch) {
-    payload.plugins = [{ id: "web" }];
-  }
+  if (effort.maxTokens) payload.max_tokens = effort.maxTokens;
+  if (effort.reasoning) payload.reasoning = { effort: effort.reasoning };
+  if (webSearch) payload.plugins = [{ id: 'web', max_results: 3 }]; // the plugin is billed per result
 
   const res = await fetchWithTimeout(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
@@ -319,6 +338,7 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal, webS
     },
     body: JSON.stringify(payload),
     signal,
+    timeout: CHAT_TIMEOUT_MS,
   });
   if (!res.ok) throw await httpError(res);
 
@@ -426,16 +446,24 @@ function requirementsOf(messages) {
   return { needs, tokens: Math.ceil(chars / 3.5) };
 }
 
-const OPENROUTER_PREFERRED = [/deepseek.*r1/i, /llama-3\.3/i, /qwen/i];
+// Fast models first. Reasoning-heavy models (R1, "thinking", o1/o3) burn many tokens, so they go last.
+const OPENROUTER_PREFERRED = [/llama-3\.3/i, /qwen/i, /gemma/i];
+const OPENROUTER_HEAVY = /\br1\b|thinking|reason|\bo[13]\b/i;
+const openRouterRank = (id) => {
+  if (OPENROUTER_HEAVY.test(id)) return OPENROUTER_PREFERRED.length + 1;
+  const i = OPENROUTER_PREFERRED.findIndex((re) => re.test(id));
+  return i < 0 ? OPENROUTER_PREFERRED.length : i;
+};
 const isStable = (id) => !/preview|exp/i.test(id);
 
+// Gemini fallbacks are Flash models only: cheap, fast, and never the forced-thinking Pro models.
 function geminiCandidates(skip) {
-  const live = getCatalog('gemini').filter((m) => !skip(`gemini:${m.id}`));
+  const live = getCatalog('gemini').filter((m) => /flash/i.test(m.id) && !skip(`gemini:${m.id}`));
   return [...live.filter((m) => isStable(m.id)), ...live.filter((m) => !isStable(m.id))].map((m) => m.id);
 }
 
 function openRouterCandidates(skip, { needs, tokens }) {
-  const rank = (id) => { const i = OPENROUTER_PREFERRED.findIndex((re) => re.test(id)); return i < 0 ? OPENROUTER_PREFERRED.length : i; };
+  const rank = openRouterRank;
   return getCatalog('openrouter')
     .filter((m) => m.free === true && !skip(`openrouter:${m.id}`))
     .filter((m) => [...needs].every((n) => (m.input ?? ['text']).includes(n)))
@@ -458,7 +486,11 @@ export function buildAttempts(selected, keys, req = { needs: new Set(), tokens: 
   };
   const candidates = (provider) => (provider === 'gemini' ? geminiCandidates(skip) : openRouterCandidates(skip, req));
 
-  add(selected.provider, selected.id); // the user's own choice is always tried first, cooldown or not
+  // The user's own choice is tried first, even when it was rate-limited a moment ago. Only a model
+  // that was reported as gone (404, a 6h cooldown) is skipped, so we don't send a request that can't work.
+  const selectedTag = `${selected.provider}:${selected.id}`;
+  const retired = (cooling[selectedTag] ?? 0) - Date.now() > BUSY_MS;
+  if (!retired) add(selected.provider, selected.id);
   let extra = 0;
   for (const id of candidates(selected.provider)) {
     if (extra >= SAME_PROVIDER_FALLBACKS) break;
@@ -470,10 +502,11 @@ export function buildAttempts(selected, keys, req = { needs: new Set(), tokens: 
     if (extra >= OTHER_PROVIDER_FALLBACKS) break;
     if (add(other, id)) extra++;
   }
+  if (!attempts.length) add(selected.provider, selected.id);
   return attempts;
 }
 
-export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, selected, keys, signal, webSearch }) {
+export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, selected, keys, signal, webSearch, effort = 'lean', fallbacks = true }) {
   if (!selected?.id) throw Object.assign(new Error('No model is selected.'), { fatal: true });
   if (!keys?.[selected.provider]) {
     throw Object.assign(
@@ -482,7 +515,10 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
     );
   }
 
-  const attempts = buildAttempts(selected, keys, requirementsOf(messages));
+  const profile = EFFORT[effort] ?? EFFORT.lean;
+  const attempts = fallbacks
+    ? buildAttempts(selected, keys, requirementsOf(messages))
+    : [{ provider: selected.provider, model: selected.id }];
   let lastError = null;
   let best = null; // the most informative failure, so a phantom model's 404 can't hide the real cause
 
@@ -493,7 +529,7 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
     let produced = false;
     try {
       const run = RUNNERS[target.provider]({
-        model: target.model, apiKey: keys[target.provider], messages, system, signal, webSearch,
+        model: target.model, apiKey: keys[target.provider], messages, system, signal, webSearch, effort: profile,
       });
       for await (const chunk of run) {
         if (chunk.type === 'text' || chunk.type === 'thought') produced = true;
@@ -524,23 +560,31 @@ export async function* streamChat({ messages, system = DEFAULT_SYSTEM_PROMPT, se
   throw best?.err ?? lastError ?? new Error('No model is available.');
 }
 
-export function pickHelperModel(keys, selected) {
+/**
+ * Cheap model for background summaries and notes. Returns null when nothing cheap is known,
+ * and the caller then skips the upkeep instead of quietly spending the user's chosen model.
+ */
+export function pickHelperModel(keys) {
+  const cooling = readCooldowns();
   if (keys.gemini) {
-    const ids = getCatalog('gemini').map((m) => m.id);
-    const id = ids.find((i) => GEMINI_FREE_TIER.has(i) && /flash-lite/.test(i))
-      || ids.find((i) => GEMINI_FREE_TIER.has(i) && /flash/.test(i));
+    const ids = getCatalog('gemini').map((m) => m.id).filter((i) => !(`gemini:${i}` in cooling));
+    const id = ids.find((i) => isGeminiFree(i) && /flash-lite/.test(i)) || ids.find((i) => isGeminiFree(i));
     if (id) return { provider: 'gemini', id };
   }
   if (keys.openrouter) {
-    const free = getCatalog('openrouter').find((m) => m.free === true);
-    if (free) return { provider: 'openrouter', id: free.id };
+    const pick = getCatalog('openrouter')
+      .filter((m) => m.free === true && !(`openrouter:${m.id}` in cooling) && (m.input ?? ['text']).includes('text') && (!m.ctx || m.ctx >= 16000))
+      .sort((a, b) => openRouterRank(a.id) - openRouterRank(b.id) || (b.ctx || 0) - (a.ctx || 0))[0];
+    if (pick) return { provider: 'openrouter', id: pick.id };
   }
-  return selected;
+  return null;
 }
 
-export async function completeOnce({ system, prompt, selected, keys, timeoutMs = 20_000 }) {
+export async function completeOnce({ system, prompt, selected, keys, signal, timeoutMs = 20_000 }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', () => controller.abort(), { once: true });
   try {
     let text = '';
     const stream = streamChat({
@@ -549,6 +593,8 @@ export async function completeOnce({ system, prompt, selected, keys, timeoutMs =
       selected,
       keys,
       signal: controller.signal,
+      effort: 'helper',
+      fallbacks: false, // one cheap attempt; a failing helper must not cascade into more requests
     });
     for await (const chunk of stream) {
       if (chunk.type === 'text') text += chunk.delta;

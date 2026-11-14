@@ -35,6 +35,21 @@ export function removeCatalogCache(provider) {
   write(CATALOG_KEY, JSON.stringify(cache));
 }
 
+/* ---------- App settings ---------- */
+
+const SETTINGS_KEY = 'APP_SETTINGS_V1';
+
+export const settingsStore = {
+  /** { saveTokens: boolean } — saveTokens caps thinking and reply length (default on). */
+  load() {
+    try {
+      const s = JSON.parse(read(SETTINGS_KEY)) || {};
+      return { saveTokens: s.saveTokens !== false };
+    } catch { return { saveTokens: true }; }
+  },
+  save({ saveTokens }) { return write(SETTINGS_KEY, JSON.stringify({ saveTokens: saveTokens !== false })); },
+};
+
 /* ---------- Memory notes (shared by every chat) ---------- */
 
 const MEMORY_KEY = 'MEMORY_NOTES_V1';
