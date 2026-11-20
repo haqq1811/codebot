@@ -1119,6 +1119,23 @@ function init() {
     sendMessage();
   });
   els.userInput.addEventListener('input', autoGrow);
+    let lastWarm = 0;
+  const warmConnection = () => {
+    const now = Date.now();
+    if (now - lastWarm < 15_000) return;
+    lastWarm = now;
+    const provider = currentSelection()?.provider;
+    const origin = provider === 'openrouter' ? 'https://openrouter.ai' : 'https://googleapis.com';
+    const link = document.createElement('link');
+    link.rel = 'preconnect';
+    link.href = origin;
+    link.crossOrigin = 'anonymous';
+    document.head.append(link);
+    setTimeout(() => link.remove(), 10_000);
+  };
+  els.userInput.addEventListener('focus', warmConnection);
+  els.userInput.addEventListener('input', autoGrow);
+  
   els.userInput.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || e.isComposing) return;
     const touch = window.matchMedia('(pointer: coarse)').matches;
