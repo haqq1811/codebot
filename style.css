@@ -167,7 +167,7 @@ header {
 }
 .thought summary::-webkit-details-marker { display: none; }
 .thought summary::before {
-  content: '▸';
+  content: '>';
   color: var(--accent);
   font-size: .8rem;
   transition: transform .2s ease;
