@@ -180,9 +180,6 @@ async function fetchWithTimeout(resource, options = {}) {
   }
 }
 
-  return fetch(resource, { ...options, signal: combinedSignal }).finally(() => clearTimeout(id));
-}
-
 function fileAsText(f) {
   const text = String(f.text ?? '');
   const runs = text.match(/`+/g);
