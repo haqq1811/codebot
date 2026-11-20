@@ -22,13 +22,10 @@ const isGeminiFree = (id) => /^gemini-\d+(?:\.\d+)?-flash(?:-lite)?(?:-\d{2,3})?
 // How hard a request may think / how long it may answer. 'lean' is the default; 'full' = no caps;
 // 'helper' is for background summaries and notes.
 const EFFORT = {
-  full: { thinking: 'default', maxTokens: 0, timeoutMS: 45_000 },
-  lean: { thinking: 'low', maxTokens: 8192, timeoutMS: 20_000 },
-  helper: { thinking: 'off', maxTokens: 2048, timeoutMS: 10_000 },
+  full: { thinking: 'default', reasoning: 'medium', maxTokens: 0, timeoutMS: 45_000 },
+  lean: { thinking: 'low', reasoning: 'low', maxTokens: 8192, timeoutMS: 20_000 },
+  helper: { thinking: 'off', reasoning: 'none', maxTokens: 2048, timeoutMS: 10_000 },
 };
-// covers waiting for the first response; slow free models need it
-// Replace CHAT_TIMEOUT_MS with:
-const timeout = effort?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
 export function pricingTag(provider, model) {
   if (provider === 'openrouter') return model.free === true ? ' (Free)' : model.free === false ? ' (Paid)' : '';
@@ -163,11 +160,11 @@ async function* sseData(res) {
   }
 }
 
-function fetchWithTimeout(resource, options = {}) {
+async function fetchWithTimeout(resource, options = {}) {
   const { timeout = 25000 } = options;
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
-  
+
   let combinedSignal = controller.signal;
   if (options.signal) {
     // AbortSignal.any is missing on older Android WebViews, so fall back to forwarding the abort.
@@ -175,6 +172,13 @@ function fetchWithTimeout(resource, options = {}) {
     else if (options.signal.aborted) controller.abort();
     else options.signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
+
+  try {
+    return await fetch(resource, { ...options, signal: combinedSignal });
+  } finally {
+    clearTimeout(id);
+  }
+}
 
   return fetch(resource, { ...options, signal: combinedSignal }).finally(() => clearTimeout(id));
 }
