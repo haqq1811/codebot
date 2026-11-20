@@ -22,11 +22,13 @@ const isGeminiFree = (id) => /^gemini-\d+(?:\.\d+)?-flash(?:-lite)?(?:-\d{2,3})?
 // How hard a request may think / how long it may answer. 'lean' is the default; 'full' = no caps;
 // 'helper' is for background summaries and notes.
 const EFFORT = {
-  full: { thinking: 'default', maxTokens: 0, reasoning: '' },
-  lean: { thinking: 'low', maxTokens: 8192, reasoning: 'low' },
-  helper: { thinking: 'off', maxTokens: 2048, reasoning: 'low' },
+  full: { thinking: 'default', maxTokens: 0, timeoutMS: 45_000 },
+  lean: { thinking: 'low', maxTokens: 8192, timeoutMS: 20_000 },
+  helper: { thinking: 'off', maxTokens: 2048, timeoutMS: 10_000 },
 };
-const CHAT_TIMEOUT_MS = 60_000; // covers waiting for the first response; slow free models need it
+// covers waiting for the first response; slow free models need it
+// Replace CHAT_TIMEOUT_MS with:
+const timeout = effort?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
 export function pricingTag(provider, model) {
   if (provider === 'openrouter') return model.free === true ? ' (Free)' : model.free === false ? ' (Paid)' : '';
@@ -236,7 +238,7 @@ async function* streamGemini({ model, apiKey, messages, system, signal, webSearc
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify(body),
       signal,
-      timeout: CHAT_TIMEOUT_MS,
+      timeout: effort?.timeoutMS,
     });
 
     if (res.ok) break;
@@ -338,7 +340,7 @@ async function* streamOpenRouter({ model, apiKey, messages, system, signal, webS
     },
     body: JSON.stringify(payload),
     signal,
-    timeout: CHAT_TIMEOUT_MS,
+    timeout: effort?.timeoutMS,
   });
   if (!res.ok) throw await httpError(res);
 
